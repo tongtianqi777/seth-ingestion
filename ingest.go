@@ -27,7 +27,7 @@ type Ingester struct {
 	store       *db.Store
 	targetPhone string // digits only, e.g. 14125778174
 	targetName  string // stored in messages.sender
-	imageDir    string
+	mediaDir    string // images and other media are saved here
 	log         waLog.Logger
 
 	mu      sync.RWMutex // guards stopped against concurrent enqueue during Stop
@@ -41,13 +41,13 @@ type job struct {
 	source string
 }
 
-func NewIngester(client *whatsmeow.Client, store *db.Store, targetPhone, targetName, imageDir string, log waLog.Logger) *Ingester {
+func NewIngester(client *whatsmeow.Client, store *db.Store, targetPhone, targetName, mediaDir string, log waLog.Logger) *Ingester {
 	return &Ingester{
 		client:      client,
 		store:       store,
 		targetPhone: targetPhone,
 		targetName:  targetName,
-		imageDir:    imageDir,
+		mediaDir:    mediaDir,
 		log:         log,
 		queue:       make(chan job, 1024),
 		done:        make(chan struct{}),
@@ -151,12 +151,13 @@ func (in *Ingester) phoneFor(jid types.JID) string {
 
 func (in *Ingester) process(ctx context.Context, evt *events.Message, source string) error {
 	info := evt.Info
-	exists, err := in.store.Exists(ctx, info.Chat.String(), info.ID)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
+	msg := evt.Message
+	// whatsmeow doesn't unwrap album items, which may arrive wrapped in an AssociatedChildMessage.
+	if child := msg.GetAssociatedChildMessage().GetMessage(); child != nil {
+		if child.MessageContextInfo == nil {
+			child.MessageContextInfo = msg.MessageContextInfo
+		}
+		msg = child
 	}
 
 	phone, _ := in.targetSender(info.MessageSource)
@@ -171,24 +172,40 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		SentAt:      info.Timestamp,
 		Source:      source,
 	}
-	if raw, err := protojson.Marshal(evt.Message); err == nil {
+	if raw, err := protojson.Marshal(msg); err == nil {
 		m.RawJSON = string(raw)
 	}
 
-	msg := evt.Message
+	var atts []db.MediaFile
+	md := mediaOf(msg)
 	switch {
 	case msg.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT:
 		pm := msg.GetProtocolMessage()
 		m.MessageType = "edit"
 		m.EditTargetID = pm.GetKey().GetID()
 		m.Body = textOf(pm.GetEditedMessage())
-	case msg.GetImageMessage() != nil:
-		img := msg.GetImageMessage()
-		m.MessageType = "image"
-		m.Body = img.GetCaption()
-		m.QuotedID = img.GetContextInfo().GetStanzaID()
-		m.MediaMime = img.GetMimetype()
-		in.saveImage(ctx, img, info, m)
+	case msg.GetAlbumMessage() != nil:
+		// The album's own message carries no files; its items arrive as separate messages.
+		m.MessageType = "album"
+	case md != nil:
+		seen, err := in.store.MediaFileExists(ctx, m.ChatJID, info.ID)
+		if err != nil || seen {
+			return err
+		}
+		att := in.saveMedia(ctx, md, info)
+		if parentID, index, ok := albumParent(msg); ok {
+			// Store the file under the album's message, so the album stays one messages row.
+			// The album's own message fills in raw_json when it arrives.
+			m.MessageID = parentID
+			m.MessageType = "album"
+			m.RawJSON = ""
+			att.Position = index
+		} else {
+			m.MessageType = md.kind
+			m.QuotedID = md.context.GetStanzaID()
+		}
+		m.Body = md.caption
+		atts = append(atts, att)
 	case msg.GetConversation() != "" || msg.GetExtendedTextMessage() != nil:
 		m.MessageType = "text"
 		m.Body = textOf(msg)
@@ -197,34 +214,98 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		m.MessageType = "other"
 	}
 
-	inserted, err := in.store.Insert(ctx, m)
+	isNew, err := in.store.Save(ctx, m, atts)
 	if err != nil {
 		return err
 	}
-	if inserted {
+	if isNew {
 		in.log.Infof("Stored %s %s message %s from %s: %q", source, m.MessageType, m.MessageID, info.PushName, truncate(m.Body, 80))
+	}
+	for _, a := range atts {
+		if a.Error == "" {
+			in.log.Infof("Saved %s media file of message %s: %s", a.MediaType, m.MessageID, a.RelativePath)
+		}
 	}
 	return nil
 }
 
-func (in *Ingester) saveImage(ctx context.Context, img *waE2E.ImageMessage, info types.MessageInfo, m *db.Message) {
-	data, err := in.client.Download(ctx, img)
-	if err != nil {
-		m.MediaError = err.Error()
-		in.log.Warnf("Failed to download image %s: %v", info.ID, err)
-		return
+// media is a downloadable file carried by a message.
+type media struct {
+	file     whatsmeow.DownloadableMessage
+	kind     string // image | video | audio | voice | document | sticker
+	mime     string
+	caption  string
+	fileName string
+	context  *waE2E.ContextInfo
+}
+
+func mediaOf(msg *waE2E.Message) *media {
+	switch {
+	case msg.GetImageMessage() != nil:
+		x := msg.GetImageMessage()
+		return &media{x, "image", x.GetMimetype(), x.GetCaption(), "", x.GetContextInfo()}
+	case msg.GetVideoMessage() != nil:
+		x := msg.GetVideoMessage()
+		return &media{x, "video", x.GetMimetype(), x.GetCaption(), "", x.GetContextInfo()}
+	case msg.GetAudioMessage() != nil:
+		x := msg.GetAudioMessage()
+		kind := "audio"
+		if x.GetPTT() {
+			kind = "voice"
+		}
+		return &media{x, kind, x.GetMimetype(), "", "", x.GetContextInfo()}
+	case msg.GetDocumentMessage() != nil:
+		x := msg.GetDocumentMessage()
+		return &media{x, "document", x.GetMimetype(), x.GetCaption(), x.GetFileName(), x.GetContextInfo()}
+	case msg.GetStickerMessage() != nil:
+		x := msg.GetStickerMessage()
+		return &media{x, "sticker", x.GetMimetype(), "", "", x.GetContextInfo()}
 	}
-	name := fmt.Sprintf("%s_%s%s", info.Timestamp.UTC().Format("20060102T150405Z"), info.ID, extFor(img.GetMimetype()))
-	path := filepath.Join(in.imageDir, name)
+	return nil
+}
+
+// albumParent returns the ID of the album message that msg is an item of.
+func albumParent(msg *waE2E.Message) (parentID string, index int, ok bool) {
+	assoc := msg.GetMessageContextInfo().GetMessageAssociation()
+	if assoc.GetAssociationType() != waE2E.MessageAssociation_MEDIA_ALBUM {
+		return "", 0, false
+	}
+	parentID = assoc.GetParentMessageKey().GetID()
+	return parentID, int(assoc.GetMessageIndex()), parentID != ""
+}
+
+func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.MessageInfo) db.MediaFile {
+	att := db.MediaFile{
+		SourceMessageID: info.ID,
+		MediaType:       md.kind,
+		Caption:         md.caption,
+		FileName:        md.fileName,
+		Mime:            md.mime,
+	}
+	data, err := in.client.Download(ctx, md.file)
+	if err != nil {
+		att.Error = err.Error()
+		in.log.Warnf("Failed to download %s %s: %v", md.kind, info.ID, err)
+		return att
+	}
+	// rel is relative to mediaDir and may include subdirectories in future.
+	rel := fmt.Sprintf("%s_%s%s", info.Timestamp.UTC().Format("20060102T150405Z"), info.ID, extFor(md.mime, md.fileName))
+	path := filepath.Join(in.mediaDir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		att.Error = err.Error()
+		in.log.Errorf("Failed to create directory for %s: %v", path, err)
+		return att
+	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		m.MediaError = err.Error()
-		in.log.Errorf("Failed to write image %s: %v", path, err)
-		return
+		att.Error = err.Error()
+		in.log.Errorf("Failed to write %s: %v", path, err)
+		return att
 	}
 	sum := sha256.Sum256(data)
-	m.MediaPath = path
-	m.MediaSize = int64(len(data))
-	m.MediaSHA256 = hex.EncodeToString(sum[:])
+	att.RelativePath = rel
+	att.Size = int64(len(data))
+	att.SHA256 = hex.EncodeToString(sum[:])
+	return att
 }
 
 func textOf(msg *waE2E.Message) string {
@@ -237,18 +318,35 @@ func textOf(msg *waE2E.Message) string {
 	if t := msg.GetExtendedTextMessage().GetText(); t != "" {
 		return t
 	}
-	return msg.GetImageMessage().GetCaption()
+	if md := mediaOf(msg); md != nil {
+		return md.caption
+	}
+	return ""
 }
 
-func extFor(mimetype string) string {
+// extFor picks a file extension, preferring a document's own file name.
+func extFor(mimetype, fileName string) string {
+	if ext := filepath.Ext(fileName); ext != "" {
+		return strings.ToLower(ext)
+	}
 	base, _, _ := strings.Cut(mimetype, ";")
-	switch base {
+	switch strings.TrimSpace(base) {
 	case "image/jpeg":
 		return ".jpg"
 	case "image/png":
 		return ".png"
 	case "image/webp":
 		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/mp4":
+		return ".m4a"
+	case "application/pdf":
+		return ".pdf"
 	}
 	if exts, _ := mime.ExtensionsByType(base); len(exts) > 0 {
 		return exts[0]

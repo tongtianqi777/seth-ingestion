@@ -28,18 +28,18 @@ func main() {
 		contactPhone = flag.String("contact-phone", env("SETH_CONTACT_PHONE", "14125778174"), "phone number of the contact to monitor, with country code")
 		contactName  = flag.String("contact-name", env("SETH_CONTACT_NAME", "Ziwei Hu"), "name of the contact, stored in the sender column")
 		dataDir      = flag.String("data-dir", env("SETH_DATA_DIR", "./data"), "directory for the session and message databases")
-		imageDir     = flag.String("image-dir", env("SETH_IMAGE_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "directory to save images into")
+		mediaDir     = flag.String("media-dir", env("SETH_MEDIA_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "directory to save images and other media into")
 		logLevel     = flag.String("log-level", env("SETH_LOG_LEVEL", "INFO"), "DEBUG, INFO, WARN or ERROR")
 	)
 	flag.Parse()
 
-	if err := run(*contactPhone, *contactName, *dataDir, *imageDir, *logLevel); err != nil {
+	if err := run(*contactPhone, *contactName, *dataDir, *mediaDir, *logLevel); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(contactPhone, contactName, dataDir, imageDir, logLevel string) error {
+func run(contactPhone, contactName, dataDir, mediaDir, logLevel string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -49,7 +49,7 @@ func run(contactPhone, contactName, dataDir, imageDir, logLevel string) error {
 		phone = "1" + phone // assume a US number when no country code is given
 	}
 
-	for _, dir := range []string{dataDir, imageDir} {
+	for _, dir := range []string{dataDir, mediaDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
@@ -71,8 +71,13 @@ func run(contactPhone, contactName, dataDir, imageDir, logLevel string) error {
 	} else if n > 0 {
 		log.Infof("Set sender = %q on %d existing messages", contactName, n)
 	}
+	if n, err := store.MigrateLegacyMedia(ctx, mediaDir); err != nil {
+		return fmt.Errorf("move media to message_media_files: %w", err)
+	} else if n > 0 {
+		log.Infof("Moved %d existing media files into message_media_files", n)
+	}
 
-	cfg := sessionConfig{store: store, phone: phone, contactName: contactName, dataDir: dataDir, imageDir: imageDir, log: log}
+	cfg := sessionConfig{store: store, phone: phone, contactName: contactName, dataDir: dataDir, mediaDir: mediaDir, log: log}
 	for {
 		device, err := container.GetFirstDevice(ctx)
 		if err != nil {
@@ -93,7 +98,7 @@ type sessionConfig struct {
 	phone       string
 	contactName string
 	dataDir     string
-	imageDir    string
+	mediaDir    string
 	log         waLog.Logger
 }
 
@@ -103,7 +108,7 @@ type sessionConfig struct {
 func runSession(ctx context.Context, device *store.Device, cfg sessionConfig) (relink bool, err error) {
 	log := cfg.log
 	client := whatsmeow.NewClient(device, waLog.Stdout("Client", "WARN", true))
-	ingester := NewIngester(client, cfg.store, cfg.phone, cfg.contactName, cfg.imageDir, log)
+	ingester := NewIngester(client, cfg.store, cfg.phone, cfg.contactName, cfg.mediaDir, log)
 	go ingester.Run(context.Background())
 	defer ingester.Stop()
 	client.AddEventHandler(ingester.HandleEvent)
@@ -114,7 +119,7 @@ func runSession(ctx context.Context, device *store.Device, cfg sessionConfig) (r
 		switch evt := evt.(type) {
 		case *events.Connected:
 			log.Infof("Connected as %s. Monitoring direct messages from %s (+%s)", client.Store.ID.User, cfg.contactName, cfg.phone)
-			log.Infof("Messages -> %s, images -> %s. Press Ctrl+C to stop.", filepath.Join(cfg.dataDir, "messages.db"), cfg.imageDir)
+			log.Infof("Messages -> %s, media -> %s. Press Ctrl+C to stop.", filepath.Join(cfg.dataDir, "messages.db"), cfg.mediaDir)
 		case *events.LoggedOut:
 			log.Warnf("Logged out by WhatsApp (reason: %s)", evt.Reason)
 			signalOnce(loggedOut)
