@@ -43,8 +43,9 @@ CREATE TABLE IF NOT EXISTS message_media_files (
     id                INTEGER PRIMARY KEY,
     chat_jid          TEXT    NOT NULL,            -- with message_id: the messages row this file belongs to
     message_id        TEXT    NOT NULL,
-    source_message_id TEXT    NOT NULL,            -- WhatsApp ID of the message that carried the file; for album
-                                                   -- items this is the item's own ID, otherwise equal to message_id
+    source_message_id TEXT    NOT NULL,            -- ID of the WhatsApp message that delivered this file. Same as
+                                                   -- message_id, except for album items: message_id is the album,
+                                                   -- this is the item's own message. Identifies the file for dedup.
     position          INTEGER NOT NULL DEFAULT 0,  -- order within an album (0 for single-file messages)
 
     media_type        TEXT    NOT NULL,            -- image | video | audio | voice | document | sticker

@@ -1,0 +1,298 @@
+# Database
+
+This document describes how seth-ingestion stores what it captures: the tables and their columns, how each kind of WhatsApp message becomes rows, the rules for writing those rows, and how older databases are upgraded. For setup and usage, see the [README](../README.md). For the rest of the code, see the [development guide](DEVELOPMENT.md).
+
+The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in [db/db.go](../db/db.go) and `Ingester.process` in [ingest.go](../ingest.go).
+
+## Overview
+
+| Store | Location | Owner | Contents |
+|---|---|---|---|
+| Message database | `data/messages.db` (`-data-dir`) | seth-ingestion | `messages` and `message_media_files` |
+| Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` (`-media-dir`) | seth-ingestion | the downloaded files that `message_media_files` points to |
+| Session database | `data/whatsmeow-session.db` | whatsmeow | device keys, the login session and contact mappings. **Don't write to it.** whatsmeow creates and upgrades it itself |
+
+Both databases are SQLite. The message database runs in WAL mode, so it's normal to see `messages.db-wal` and `messages.db-shm` next to it. You can read the database with `sqlite3` or any SQLite viewer while the program is running.
+
+```mermaid
+erDiagram
+    messages ||--o{ message_media_files : "has 0..n"
+    messages {
+        TEXT chat_jid PK
+        TEXT message_id PK
+        TEXT sender
+        TEXT message_type
+        TEXT body
+        INTEGER media_file_count
+        TEXT sent_at
+    }
+    message_media_files {
+        INTEGER id PK
+        TEXT chat_jid FK
+        TEXT message_id FK
+        TEXT source_message_id UK
+        INTEGER position
+        TEXT media_type
+        TEXT relative_path
+    }
+```
+
+Each WhatsApp message is **exactly one** row in `messages`, even when it has several files. Each downloaded file is one row in `message_media_files`, which points back to its message.
+
+## Conventions
+
+- **Timestamps** are RFC3339 strings in UTC, such as `2026-10-12T05:35:08Z`. They sort correctly as text, and SQLite date functions accept them: `datetime(sent_at, 'localtime')`.
+- **Empty values are stored as `NULL`**, not as an empty string. The exception is `sender`, which is `NOT NULL DEFAULT ''`.
+- **JIDs** are WhatsApp addresses. A user's JID is either `<phone>@s.whatsapp.net` or an opaque LID such as `216865834029298@lid`. WhatsApp is moving to LIDs, so don't parse phone numbers out of JIDs. Use `sender_phone`.
+- **Message IDs** are WhatsApp's own IDs, such as `3A37298F72373DFA1114`. They are unique within a chat, which is why keys always pair them with `chat_jid`.
+
+## Tables
+
+### `messages`
+
+One row per WhatsApp message from the monitored contact, in a direct chat.
+
+| Column | Type | Null? | Description |
+|---|---|---|---|
+| `chat_jid` | TEXT | no | The chat the message was sent in. Only direct chats are ingested, so this is the contact's JID. **Primary key**, with `message_id` |
+| `message_id` | TEXT | no | WhatsApp message ID. **Primary key**, with `chat_jid`. For an album, this is the album's own message ID |
+| `sender` | TEXT | no | The monitored contact's name as configured with `-contact-name`, e.g. `Ziwei Hu`. A stable label you control, for grouping by contact |
+| `sender_jid` | TEXT | no | The sender's JID as WhatsApp sent it. May be a phone JID or a LID |
+| `sender_phone` | TEXT | yes | The sender's phone number in international format, digits only, e.g. `14125778174`. Resolved from a LID when needed |
+| `sender_name` | TEXT | yes | The display name the contact has set for themselves in WhatsApp at the time of the message. It can change over time, so group by `sender`, not by this |
+| `is_group` | INTEGER | no | Always `0`. Only rows captured by a very early version, before group messages were excluded, can have `1` |
+| `sent_at` | TEXT | no | When WhatsApp says the message was sent. For an album, the earliest time seen across the album and its items |
+| `ingested_at` | TEXT | no | When seth-ingestion first wrote the row |
+| `message_type` | TEXT | no | What kind of message this is. See [Message types](#message-types) |
+| `body` | TEXT | yes | The text of a `text` or `edit` message, or the caption of a media message. For an album, the first caption received from any of its items |
+| `edit_target_id` | TEXT | yes | For `edit` rows only: the ID of the message that was edited |
+| `quoted_id` | TEXT | yes | If this message is a reply, the ID of the message it replies to |
+| `media_file_count` | INTEGER | no | How many `message_media_files` rows belong to this message. `0` for messages without files |
+| `source` | TEXT | no | `live` if received while running, or `history` if it came from the chat history WhatsApp sends after linking |
+| `raw_json` | TEXT | yes | The full WhatsApp message as protobuf JSON. Used to re-process messages, and to read fields that have no column of their own. `NULL` only for an album whose album message hasn't arrived yet |
+
+Indexes:
+
+| Index | Columns | Used for |
+|---|---|---|
+| primary key | `chat_jid, message_id` | looking up a message; preventing duplicates |
+| `idx_messages_sent_at` | `sent_at` | listing messages by time |
+| `idx_messages_sender` | `sender, sent_at` | one contact's messages by time |
+| `idx_messages_sender_phone` | `sender_phone, sent_at` | the same, by phone number |
+
+### `message_media_files`
+
+One row per media file that a message carried, whether or not the download worked.
+
+| Column | Type | Null? | Description |
+|---|---|---|---|
+| `id` | INTEGER | no | Row ID. **Primary key** |
+| `chat_jid` | TEXT | no | **Foreign key**, with `message_id`, to the `messages` row this file belongs to |
+| `message_id` | TEXT | no | The `messages` row this file is listed under. For an album item, this is the album's ID. See [`message_id` vs `source_message_id`](#message_id-vs-source_message_id) |
+| `source_message_id` | TEXT | no | The ID of the WhatsApp message that delivered this file. Usually the same as `message_id`. For an album item, it's that item's own ID. **Unique**, with `chat_jid`. See [`message_id` vs `source_message_id`](#message_id-vs-source_message_id) |
+| `position` | INTEGER | no | Order within an album, starting from 0. Always `0` for single-file messages |
+| `media_type` | TEXT | no | `image`, `video`, `audio`, `voice` (a recorded voice note), `document` or `sticker` |
+| `caption` | TEXT | yes | This file's own caption |
+| `file_name` | TEXT | yes | The original file name. Only documents have one |
+| `relative_path` | TEXT | yes | Where the file was saved, relative to the media folder, always with `/` separators. `NULL` if the download failed |
+| `mime` | TEXT | yes | MIME type as reported by WhatsApp, e.g. `image/jpeg` or `audio/ogg; codecs=opus` |
+| `size` | INTEGER | yes | File size in bytes |
+| `sha256` | TEXT | yes | Hex SHA-256 of the saved file. The same picture sent twice has the same value |
+| `error` | TEXT | yes | Why the download or save failed. `NULL` when the file was saved |
+| `ingested_at` | TEXT | no | When the row was written |
+
+Keys and indexes:
+
+- **Foreign key** `(chat_jid, message_id)` → `messages (chat_jid, message_id)`, with `ON DELETE CASCADE`. Deleting a message deletes its media file rows. **It does not delete the files on disk.** Foreign keys are enforced, because the program opens the database with `_foreign_keys=on`.
+- **Unique** `(chat_jid, source_message_id)`, so a file delivered by one WhatsApp message can't be recorded twice.
+- `idx_media_files_message` on `(chat_jid, message_id, position)`, for listing a message's files in order.
+
+The reference sits on the media file side because one message can have many files. `messages.media_file_count` lets you find messages with files without a join.
+
+### `message_id` vs `source_message_id`
+
+WhatsApp delivers each file in its own message, with its own ID. Most of the time, that message is also the one we store, so both columns hold the same ID. Albums are the exception. An album arrives as one album message plus one message per photo, but we store the album as a single `messages` row. So for album photos the two columns differ:
+
+- **`message_id`**: the `messages` row the file is listed under. For album photos, this is the album's ID.
+- **`source_message_id`**: the WhatsApp message that delivered the file. For album photos, this is the photo's own ID.
+
+For example, she sends one photo (message `P1`), then later an album of two photos (album message `A`, delivered as photo messages `A1` and `A2`):
+
+| `messages.message_id` | `message_type` | `message_media_files` rows (`message_id`, `source_message_id`, `position`) |
+|---|---|---|
+| `P1` | `image` | (`P1`, `P1`, 0) |
+| `A` | `album` | (`A`, `A1`, 0) and (`A`, `A2`, 1) |
+
+Use `message_id` to find a message's files: join on `(chat_jid, message_id)`. `source_message_id` is for recognizing a file that was already stored. Every file has its own delivering message, so a `source_message_id` identifies one file. When WhatsApp sends the same message again, for example in history sync, the program sees that `source_message_id` is already stored and skips it. It also lets you match a file to the original WhatsApp message, for example to find a reply that quotes one photo from an album.
+
+## Message types
+
+`Ingester.process` decides the `message_type`, and which media file rows to write, in this order:
+
+| WhatsApp message | `message_type` | Media file rows |
+|---|---|---|
+| An edit (a `ProtocolMessage` of type `MESSAGE_EDIT`) | `edit`. `body` holds the new text, and `edit_target_id` points to the original message | none |
+| An album message (`AlbumMessage`) | `album` | none by itself. Its items add them |
+| A media message that is an item of an album | none of its own. The item is added to the album's row | one, with `position` set to the item's place in the album |
+| Any other image, video, audio, voice note, document or sticker | `image`, `video`, `audio`, `voice`, `document` or `sticker` | one |
+| Text, including replies (`Conversation` or `ExtendedTextMessage`) | `text` | none |
+| Anything else, such as reactions, locations, contacts or polls | `other`. The content is only in `raw_json` | none |
+
+View-once and disappearing messages are stored like ordinary ones. whatsmeow unwraps them before they reach the program.
+
+**Edits** are stored as separate `edit` rows, and the original message's row is left unchanged. To get the latest text of a message, look for the newest `edit` row whose `edit_target_id` is that message's ID.
+
+**Not stored:** messages you send, messages in groups, status updates, broadcast lists and newsletters. The program filters these out before anything is written.
+
+## Albums
+
+When several photos or videos are sent together, WhatsApp shows them as an album. On the wire, an album is:
+
+1. one **album message**, which has no files, only the expected number of images and videos;
+2. one **ordinary media message per item**. Each item is linked to the album's message ID and has an index within the album.
+
+The program stores the whole album as **one** `messages` row with `message_type = 'album'`, under the album's message ID. Each item becomes a `message_media_files` row with `message_id` set to the album's ID and `source_message_id` set to the item's own ID.
+
+The items and the album message can arrive in any order:
+
+```mermaid
+sequenceDiagram
+    participant WA as WhatsApp
+    participant I as Ingester
+    participant DB as messages.db
+    WA->>I: item 1 (image, links to album A)
+    I->>DB: create messages row A (album), raw_json NULL
+    I->>DB: add media file (source = item 1, position 0)
+    WA->>I: item 2 (image + caption, links to album A)
+    I->>DB: add media file (source = item 2, position 1)
+    I->>DB: row A: fill body with the caption if it's empty
+    WA->>I: album message A
+    I->>DB: row A: fill raw_json, keep the earlier sent_at
+```
+
+If the album message arrives first, it creates the row and the items just add files to it. Either way, the result is one row with `media_file_count` equal to the number of items received.
+
+The album handling is based on WhatsApp's message definitions and is covered by unit tests. It hasn't yet been checked against a real album sent from a phone.
+
+## Write rules
+
+All writes go through `Store.Save` (in [db/db.go](../db/db.go)). It writes one message row and its media file rows **in a single transaction**, so a message never appears without its file rows, or the other way round.
+
+**Message row.** Save inserts the row. If a row with the same `(chat_jid, message_id)` already exists, Save keeps it and only fills gaps:
+
+| Column | When the row already exists |
+|---|---|
+| `body` | set only if it's currently `NULL` |
+| `raw_json` | set only if it's currently `NULL` |
+| `sent_at` | replaced by the new value if that's earlier |
+| everything else | unchanged |
+
+This happens when an album's items arrive before the album message, and when history sync repeats a message the program already has.
+
+**Media file rows.** Save inserts each file, and skips any file whose `(chat_jid, source_message_id)` is already stored. It then recomputes `media_file_count` from the actual rows.
+
+**Avoiding repeat downloads.** Before downloading anything, the program checks whether that file's `source_message_id` is already stored, using `Store.MediaFileExists`. If it is, the message is skipped. That's why messages repeated by history sync aren't downloaded twice.
+
+**Failed downloads.** WhatsApp keeps media on its servers for a limited time, so a download can fail, especially for older history. The media file row is still written with `error` set and `relative_path`, `size` and `sha256` left `NULL`. The program doesn't retry these.
+
+## Media files on disk
+
+- Every file goes directly into the media folder. The name is `<sent time, UTC>_<source message id><extension>`, for example `20261012T053508Z_3A37298F72373DFA1114.jpg`.
+- The extension comes from the document's own file name if it has one, and otherwise from the MIME type.
+- To get a file's full path, join the media folder and `relative_path`. Only the relative path is stored, so the folder can move without breaking anything.
+- The program creates any missing folders before saving. File names could include subfolders later (for example `2026/10/…`) without any schema change.
+- Nothing removes files. Deleting rows from the database leaves the files on disk.
+
+## Example queries
+
+Run these with `sqlite3 -header -column data/messages.db "<query>"`.
+
+Latest messages:
+
+```sql
+SELECT datetime(sent_at, 'localtime') AS sent, message_type, body, media_file_count
+FROM messages
+ORDER BY sent_at DESC
+LIMIT 20;
+```
+
+Every file with its message, albums in order:
+
+```sql
+SELECT m.sent_at, m.message_type, f.position, f.media_type, f.relative_path, f.caption
+FROM messages m
+JOIN message_media_files f USING (chat_jid, message_id)
+ORDER BY m.sent_at DESC, f.position;
+```
+
+Albums and how many files each has:
+
+```sql
+SELECT message_id, sent_at, media_file_count, body
+FROM messages
+WHERE message_type = 'album'
+ORDER BY sent_at DESC;
+```
+
+Downloads that failed:
+
+```sql
+SELECT message_id, source_message_id, media_type, error
+FROM message_media_files
+WHERE error IS NOT NULL;
+```
+
+The same file received more than once:
+
+```sql
+SELECT sha256, COUNT(*) AS copies, GROUP_CONCAT(relative_path, ', ') AS files
+FROM message_media_files
+WHERE sha256 IS NOT NULL
+GROUP BY sha256
+HAVING copies > 1;
+```
+
+Messages with their latest edit applied:
+
+```sql
+SELECT m.message_id, m.sent_at,
+       COALESCE((SELECT e.body FROM messages e
+                 WHERE e.message_type = 'edit' AND e.edit_target_id = m.message_id
+                 ORDER BY e.sent_at DESC LIMIT 1), m.body) AS current_body
+FROM messages m
+WHERE m.message_type <> 'edit'
+ORDER BY m.sent_at;
+```
+
+A field without its own column, read from `raw_json` (here, a location's coordinates):
+
+```sql
+SELECT message_id,
+       json_extract(raw_json, '$.locationMessage.degreesLatitude')  AS lat,
+       json_extract(raw_json, '$.locationMessage.degreesLongitude') AS lng
+FROM messages
+WHERE message_type = 'other' AND json_extract(raw_json, '$.locationMessage') IS NOT NULL;
+```
+
+## Schema creation and upgrades
+
+On every start, `db.Open` brings the database up to date. Nothing needs to be set up by hand.
+
+```mermaid
+flowchart TD
+    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count)"]
+    Migrate --> Schema["run schema.sql:<br/>CREATE TABLE / INDEX IF NOT EXISTS"]
+    Schema --> Sender["Store.BackfillSender:<br/>set sender on old rows that have none"]
+    Sender --> Legacy["Store.MigrateLegacyMedia:<br/>move old media columns into message_media_files,<br/>then drop them (one transaction)"]
+```
+
+- **`schema.sql` always describes the full current schema.** A new database is created from it directly. Every statement is `IF NOT EXISTS`, so running it again is harmless.
+- **`migrate` runs before `schema.sql`.** An index in `schema.sql` may refer to a column that an older table doesn't have yet. Adding the column first lets the index be created.
+- **`BackfillSender`** fills in `sender` with the configured contact name on rows from that contact's phone number that were written before the column existed.
+- **`MigrateLegacyMedia`** upgrades databases from versions that stored at most one image per message directly on `messages`, in the columns `media_path`, `image_relative_path`, `media_mime`, `media_size`, `media_sha256` and `media_error`. It copies each image into `message_media_files`, drops those columns and recomputes `media_file_count`, all in one transaction. It needs the media folder to work out relative paths, so `main.go` calls it after `Open`. Once the old columns are gone it does nothing.
+
+To change the schema:
+
+- **Adding a column:** add it to the `CREATE TABLE` in `schema.sql`. Then add an `ALTER TABLE … ADD COLUMN` step for it to `migrate` in [db/db.go](../db/db.go), so existing databases get it too. SQLite only allows `NOT NULL` on an added column if it has a default. If existing rows need a real value, backfill them after opening, the way `BackfillSender` is called from `main.go`.
+- **Restructuring:** follow `MigrateLegacyMedia`. Detect the old shape from `pragma_table_info`, copy the data, then `DROP COLUMN`, all inside one transaction. `DROP COLUMN` needs SQLite 3.35 or later, and the bundled SQLite is 3.53. If several of these build up, switch to `PRAGMA user_version` with numbered steps.
+- **Tests:** add a case to [db/db_test.go](../db/db_test.go) that creates a database in the old shape and checks the result, as `TestMigrateLegacyMedia` does.

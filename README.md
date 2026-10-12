@@ -66,7 +66,7 @@ sqlite3 -header -column data/messages.db \
    ORDER BY m.sent_at DESC, a.position;"
 ```
 
-The schema, with each column explained, is in [db/schema.sql](db/schema.sql).
+[docs/DATABASE.md](docs/DATABASE.md) explains every table and column, how albums and edits are stored, and has more example queries.
 
 ## Configuration
 
@@ -92,4 +92,4 @@ Phone numbers can include formatting, as in `-contact-phone "+1 (412) 577-8174"`
 - **The contact's messages aren't being captured.** Newer WhatsApp chats can identify people by a hidden ID instead of their phone number. The program translates these IDs back to phone numbers. For an unfamiliar contact, though, it may need a few minutes after linking to learn the mapping. Run with `-log-level DEBUG` to see what arrives.
 - **`Failed to download …`.** WhatsApp only keeps media on its servers for a limited time. Files in older history may have expired. The message and media file rows are still saved, with the reason in the media file row's `error` column.
 
-Developer documentation is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Developer documentation is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md), and the database is documented in [docs/DATABASE.md](docs/DATABASE.md).
