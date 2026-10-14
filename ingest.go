@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,46 +22,81 @@ import (
 	"github.com/tianqitong/seth-ingestion/db"
 )
 
-// Ingester filters messages from the target contact and persists them.
+// Ingester records the messages of the monitored groups.
+//
+// Events are queued by HandleEvent and processed by Run on a single worker.
+// Which groups to monitor is only known once the client has connected, so the
+// worker holds queued events until SetGroups is called.
 type Ingester struct {
-	client      *whatsmeow.Client
-	store       *db.Store
-	targetPhone string // digits only, e.g. 14125778174
-	targetName  string // stored in messages.sender
-	mediaDir    string // images and other media are saved here
-	log         waLog.Logger
+	client   *whatsmeow.Client
+	store    *db.Store
+	mediaDir string // images and other media are saved here, in a folder per group
+	log      waLog.Logger
+
+	// groups are the monitored groups by JID. SetGroups sets it once, before
+	// closing ready; the map isn't changed after that. Only the worker reads or
+	// changes the Group values.
+	groups map[types.JID]*db.Group
+	ready  chan struct{}
 
 	mu      sync.RWMutex // guards stopped against concurrent enqueue during Stop
 	stopped bool
 	queue   chan job
+	quit    chan struct{} // closed by Stop
 	done    chan struct{}
 }
 
+// job is one queued event. Exactly one field is set.
 type job struct {
-	evt    *events.Message
-	source string
+	msg     *events.Message     // a live message
+	history *events.HistorySync // chat history WhatsApp sends after linking
+	group   *events.GroupInfo   // a group change, such as a new name
 }
 
-func NewIngester(client *whatsmeow.Client, store *db.Store, targetPhone, targetName, mediaDir string, log waLog.Logger) *Ingester {
+func NewIngester(client *whatsmeow.Client, store *db.Store, mediaDir string, log waLog.Logger) *Ingester {
 	return &Ingester{
-		client:      client,
-		store:       store,
-		targetPhone: targetPhone,
-		targetName:  targetName,
-		mediaDir:    mediaDir,
-		log:         log,
-		queue:       make(chan job, 1024),
-		done:        make(chan struct{}),
+		client:   client,
+		store:    store,
+		mediaDir: mediaDir,
+		log:      log,
+		ready:    make(chan struct{}),
+		queue:    make(chan job, 1024),
+		quit:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 }
 
-// Run processes queued messages on a single worker so that media downloads
+// SetGroups sets the groups to record and lets Run start on the queued events.
+// Call it once.
+func (in *Ingester) SetGroups(groups map[types.JID]*db.Group) {
+	in.groups = groups
+	close(in.ready)
+}
+
+// Run processes queued events on a single worker, so that media downloads
 // never block whatsmeow's event loop. It returns after Stop drains the queue.
 func (in *Ingester) Run(ctx context.Context) {
 	defer close(in.done)
+	select {
+	case <-in.ready:
+	case <-in.quit:
+	}
+	select {
+	case <-in.ready:
+	default:
+		// Stopped before the groups were known, so nothing queued can be matched.
+		for range in.queue {
+		}
+		return
+	}
 	for j := range in.queue {
-		if err := in.process(ctx, j.evt, j.source); err != nil {
-			in.log.Errorf("Failed to ingest message %s: %v", j.evt.Info.ID, err)
+		switch {
+		case j.msg != nil:
+			in.ingest(ctx, j.msg, "live")
+		case j.history != nil:
+			in.ingestHistory(ctx, j.history)
+		case j.group != nil:
+			in.updateGroup(ctx, j.group)
 		}
 	}
 }
@@ -69,70 +105,110 @@ func (in *Ingester) Stop() {
 	in.mu.Lock()
 	in.stopped = true
 	close(in.queue)
+	close(in.quit)
 	in.mu.Unlock()
 	<-in.done
 }
 
-// HandleEvent is registered with whatsmeow's AddEventHandler.
+// HandleEvent is registered with whatsmeow's AddEventHandler. It runs on
+// whatsmeow's event goroutine, so it only queues events.
 func (in *Ingester) HandleEvent(rawEvt any) {
 	switch evt := rawEvt.(type) {
 	case *events.Message:
-		in.enqueue(evt, "live")
+		if in.mayMonitor(evt.Info.Chat) {
+			in.enqueue(job{msg: evt})
+		}
 	case *events.HistorySync:
-		in.handleHistorySync(evt)
-	}
-}
-
-func (in *Ingester) handleHistorySync(evt *events.HistorySync) {
-	for _, conv := range evt.Data.GetConversations() {
-		chatJID, err := types.ParseJID(conv.GetID())
-		if err != nil || !isDirectChat(chatJID) {
-			continue
-		}
-		for _, hm := range conv.GetMessages() {
-			msg, err := in.client.ParseWebMessage(chatJID, hm.GetMessage())
-			if err != nil {
-				continue
-			}
-			in.enqueue(msg, "history")
+		in.enqueue(job{history: evt})
+	case *events.GroupInfo:
+		if evt.Name != nil && in.mayMonitor(evt.JID) {
+			in.enqueue(job{group: evt})
 		}
 	}
 }
 
-func (in *Ingester) enqueue(evt *events.Message, source string) {
-	if evt.Info.IsFromMe || evt.Info.IsGroup || !isDirectChat(evt.Info.Chat) {
-		return
+// mayMonitor reports whether chat is, or before SetGroups could be, a monitored
+// group. Direct chats, status updates, broadcast lists and newsletters never are.
+func (in *Ingester) mayMonitor(chat types.JID) bool {
+	if chat.Server != types.GroupServer {
+		return false
 	}
-	if _, ok := in.targetSender(evt.Info.MessageSource); !ok {
-		return
+	select {
+	case <-in.ready:
+		return in.groups[chat.ToNonAD()] != nil
+	default:
+		return true
 	}
+}
+
+func (in *Ingester) enqueue(j job) {
 	in.mu.RLock()
 	defer in.mu.RUnlock()
 	if !in.stopped {
-		in.queue <- job{evt: evt, source: source}
+		in.queue <- j
 	}
 }
 
-// isDirectChat reports whether jid is a one-to-one chat, as opposed to a
-// group, broadcast list, status update or newsletter.
-func isDirectChat(jid types.JID) bool {
-	return jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer
+// ingest stores evt if it was sent in a monitored group.
+func (in *Ingester) ingest(ctx context.Context, evt *events.Message, source string) {
+	g := in.groups[evt.Info.Chat.ToNonAD()]
+	if g == nil {
+		return
+	}
+	if err := in.process(ctx, evt, source, g); err != nil {
+		in.log.Errorf("Failed to ingest message %s in %s: %v", evt.Info.ID, g.Name, err)
+	}
 }
 
-// targetSender returns the sender's phone number if the message came from the
-// target contact. WhatsApp may address users by phone JID or by an opaque LID,
-// so both the primary and alternate sender JIDs are checked, and LIDs are
-// resolved to phone numbers through whatsmeow's LID mapping store.
-func (in *Ingester) targetSender(src types.MessageSource) (string, bool) {
-	for _, jid := range []types.JID{src.Sender, src.SenderAlt} {
-		if phone := in.phoneFor(jid); phone == in.targetPhone {
-			return phone, true
+func (in *Ingester) ingestHistory(ctx context.Context, evt *events.HistorySync) {
+	for _, conv := range evt.Data.GetConversations() {
+		chatJID, err := types.ParseJID(conv.GetID())
+		if err != nil || in.groups[chatJID.ToNonAD()] == nil {
+			continue
+		}
+		for _, hm := range conv.GetMessages() {
+			if hm.GetMessage().GetMessage() == nil {
+				continue // a notice such as "… joined", which has no message content
+			}
+			msg, err := in.client.ParseWebMessage(chatJID, hm.GetMessage())
+			if err != nil {
+				in.log.Debugf("Skipping history message %s: %v", hm.GetMessage().GetKey().GetID(), err)
+				continue
+			}
+			in.ingest(ctx, msg, "history")
 		}
 	}
-	return "", false
 }
 
-func (in *Ingester) phoneFor(jid types.JID) string {
+// updateGroup records a monitored group's new name. Its media folder stays the
+// same. The announcement group keeps its name, as WhatsApp keeps showing it as
+// "Announcements".
+func (in *Ingester) updateGroup(ctx context.Context, evt *events.GroupInfo) {
+	g := in.groups[evt.JID.ToNonAD()]
+	if g == nil || g.IsAnnouncement || evt.Name.Name == "" || evt.Name.Name == g.Name {
+		return
+	}
+	in.log.Infof("Group %q was renamed to %q", g.Name, evt.Name.Name)
+	if err := in.store.RenameGroup(ctx, g.JID, evt.Name.Name); err != nil {
+		in.log.Errorf("Failed to record the new name of group %q: %v", g.Name, err)
+		return
+	}
+	g.Name = evt.Name.Name
+}
+
+// senderPhone returns the sender's phone number. WhatsApp may address users by
+// phone JID or by an opaque LID, so both the primary and alternate sender JIDs
+// are checked, and LIDs are resolved through whatsmeow's LID mapping store.
+func (in *Ingester) senderPhone(ctx context.Context, src types.MessageSource) string {
+	for _, jid := range []types.JID{src.Sender, src.SenderAlt} {
+		if phone := in.phoneFor(ctx, jid); phone != "" {
+			return phone
+		}
+	}
+	return ""
+}
+
+func (in *Ingester) phoneFor(ctx context.Context, jid types.JID) string {
 	if jid.IsEmpty() {
 		return ""
 	}
@@ -141,7 +217,7 @@ func (in *Ingester) phoneFor(jid types.JID) string {
 	case types.DefaultUserServer:
 		return jid.User
 	case types.HiddenUserServer:
-		pn, err := in.client.Store.LIDs.GetPNForLID(context.Background(), jid)
+		pn, err := in.client.Store.LIDs.GetPNForLID(ctx, jid)
 		if err == nil && !pn.IsEmpty() {
 			return pn.User
 		}
@@ -149,7 +225,34 @@ func (in *Ingester) phoneFor(jid types.JID) string {
 	return ""
 }
 
-func (in *Ingester) process(ctx context.Context, evt *events.Message, source string) error {
+// senderLabel names the sender the way WhatsApp does in a group: your saved
+// contact name for them, otherwise the name they set for themselves, otherwise
+// their phone number.
+func (in *Ingester) senderLabel(ctx context.Context, info types.MessageInfo, phone string) string {
+	var contact types.ContactInfo
+	if phone != "" {
+		contact, _ = in.client.Store.Contacts.GetContact(ctx, types.NewJID(phone, types.DefaultUserServer))
+	}
+	if !contact.Found {
+		contact, _ = in.client.Store.Contacts.GetContact(ctx, info.Sender.ToNonAD())
+	}
+	names := []string{contact.FullName, contact.FirstName, info.PushName, contact.PushName, contact.BusinessName}
+	if info.IsFromMe {
+		// Your own display name isn't in the contact store; the session has it.
+		names = append(names, in.client.Store.PushName)
+	}
+	for _, name := range names {
+		if name != "" {
+			return name
+		}
+	}
+	if phone != "" {
+		return "+" + phone
+	}
+	return info.Sender.User
+}
+
+func (in *Ingester) process(ctx context.Context, evt *events.Message, source string, g *db.Group) error {
 	info := evt.Info
 	msg := evt.Message
 	// whatsmeow doesn't unwrap album items, which may arrive wrapped in an AssociatedChildMessage.
@@ -160,15 +263,15 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		msg = child
 	}
 
-	phone, _ := in.targetSender(info.MessageSource)
+	phone := in.senderPhone(ctx, info.MessageSource)
 	m := &db.Message{
-		ChatJID:     info.Chat.String(),
+		ChatJID:     g.JID,
 		MessageID:   info.ID,
-		Sender:      in.targetName,
+		Sender:      in.senderLabel(ctx, info, phone),
 		SenderJID:   info.Sender.ToNonAD().String(),
 		SenderPhone: phone,
 		SenderName:  info.PushName,
-		IsGroup:     info.IsGroup,
+		IsGroup:     true,
 		SentAt:      info.Timestamp,
 		Source:      source,
 	}
@@ -192,7 +295,7 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		if err != nil || seen {
 			return err
 		}
-		att := in.saveMedia(ctx, md, info)
+		att := in.saveMedia(ctx, md, info, g.MediaFolder)
 		if parentID, index, ok := albumParent(msg); ok {
 			// Store the file under the album's message, so the album stays one messages row.
 			// The album's own message fills in raw_json when it arrives.
@@ -219,7 +322,7 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		return err
 	}
 	if isNew {
-		in.log.Infof("Stored %s %s message %s from %s: %q", source, m.MessageType, m.MessageID, info.PushName, truncate(m.Body, 80))
+		in.log.Infof("Stored %s %s message %s in %s from %s: %q", source, m.MessageType, m.MessageID, g.Name, m.Sender, truncate(m.Body, 80))
 	}
 	for _, a := range atts {
 		if a.Error == "" {
@@ -274,7 +377,8 @@ func albumParent(msg *waE2E.Message) (parentID string, index int, ok bool) {
 	return parentID, int(assoc.GetMessageIndex()), parentID != ""
 }
 
-func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.MessageInfo) db.MediaFile {
+// saveMedia downloads md into folder, a folder of the media dir.
+func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.MessageInfo, folder string) db.MediaFile {
 	att := db.MediaFile{
 		SourceMessageID: info.ID,
 		MediaType:       md.kind,
@@ -288,17 +392,16 @@ func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.Message
 		in.log.Warnf("Failed to download %s %s: %v", md.kind, info.ID, err)
 		return att
 	}
-	// rel is relative to mediaDir and may include subdirectories in future.
-	rel := fmt.Sprintf("%s_%s%s", info.Timestamp.UTC().Format("20060102T150405Z"), info.ID, extFor(md.mime, md.fileName))
-	path := filepath.Join(in.mediaDir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	rel := mediaRelPath(folder, info, md)
+	dst := filepath.Join(in.mediaDir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		att.Error = err.Error()
-		in.log.Errorf("Failed to create directory for %s: %v", path, err)
+		in.log.Errorf("Failed to create directory for %s: %v", dst, err)
 		return att
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
 		att.Error = err.Error()
-		in.log.Errorf("Failed to write %s: %v", path, err)
+		in.log.Errorf("Failed to write %s: %v", dst, err)
 		return att
 	}
 	sum := sha256.Sum256(data)
@@ -306,6 +409,13 @@ func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.Message
 	att.Size = int64(len(data))
 	att.SHA256 = hex.EncodeToString(sum[:])
 	return att
+}
+
+// mediaRelPath is where a file is saved, relative to the media dir and with
+// "/" separators: <folder>/<UTC time>_<message id><ext>.
+func mediaRelPath(folder string, info types.MessageInfo, md *media) string {
+	name := fmt.Sprintf("%s_%s%s", info.Timestamp.UTC().Format("20060102T150405Z"), info.ID, extFor(md.mime, md.fileName))
+	return path.Join(folder, name)
 }
 
 func textOf(msg *waE2E.Message) string {

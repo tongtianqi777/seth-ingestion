@@ -1,0 +1,21 @@
+# Groups of the Seth community to record, one per line, as WhatsApp shows them.
+# Case and extra spaces don't matter. "Announcements" is the community's
+# announcement group. Messages in any group not listed here are ignored.
+# Restart seth-ingestion after editing this file.
+Announcements
+Family Connection
+Cleanup Duties/Campus Security
+Yearbook Committee
+Preschool
+Preschool P.E. Teachers
+Spiritual Matters
+Anything to do with High Tech
+Acorn Onsite Helper
+Someone Opens the Door
+Elementary Classes
+Acorn
+Sprouts
+Facilities & Outdoor
+Seth Garden Volunteers
+Seedling
+Campus Safety

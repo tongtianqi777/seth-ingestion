@@ -6,15 +6,18 @@
 -- its files are rows in message_media_files.
 CREATE TABLE IF NOT EXISTS messages (
     -- Identity. WhatsApp message IDs are unique per chat, so (chat_jid, message_id) is the key.
-    chat_jid        TEXT    NOT NULL,              -- the contact's JID (only direct chats are ingested)
+    chat_jid        TEXT    NOT NULL,              -- the group's JID (@g.us); joins to chat_groups.group_jid.
+                                                   -- Rows from the earlier single-contact version have the contact's JID.
     message_id      TEXT    NOT NULL,
 
     -- Sender
-    sender          TEXT    NOT NULL DEFAULT '',   -- name of the monitored contact as configured (-contact-name), e.g. Ziwei Hu
+    sender          TEXT    NOT NULL DEFAULT '',   -- the sender as WhatsApp labels them: your saved contact name,
+                                                   -- else their own display name, else their phone number.
+                                                   -- Your own messages are recorded the same way as everyone else's
     sender_jid      TEXT    NOT NULL,              -- may be a phone JID (@s.whatsapp.net) or a LID (@lid)
     sender_phone    TEXT,                          -- resolved E.164 digits, e.g. 14125778174
-    sender_name     TEXT,                          -- the contact's own WhatsApp display name at the time of the message
-    is_group        INTEGER NOT NULL DEFAULT 0,    -- always 0 now; 1 only on rows captured before group messages were excluded
+    sender_name     TEXT,                          -- the sender's own WhatsApp display name at the time of the message
+    is_group        INTEGER NOT NULL DEFAULT 0,    -- 1 for group messages; 0 on rows from the earlier single-contact version
 
     -- Timing
     sent_at         TEXT    NOT NULL,              -- RFC3339 UTC, from WhatsApp
@@ -35,8 +38,25 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_sent_at      ON messages (sent_at);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_sent_at ON messages (chat_jid, sent_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_phone ON messages (sender_phone, sent_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender       ON messages (sender, sent_at);
+
+-- One row per monitored WhatsApp group. messages.chat_jid joins to group_jid.
+CREATE TABLE IF NOT EXISTS chat_groups (
+    group_jid       TEXT    PRIMARY KEY,           -- e.g. 120363012345678901@g.us
+    name            TEXT    NOT NULL,              -- current name, as WhatsApp shows it ("Announcements" for the
+                                                   -- community's announcement group)
+    community_jid   TEXT,                          -- the community the group belongs to
+    community_name  TEXT,                          -- e.g. Seth
+    is_announcement INTEGER NOT NULL DEFAULT 0,    -- 1 for the community's announcement group
+    media_folder    TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+                                                   -- folder in the media dir for this group's files, e.g.
+                                                   -- cleanup-duties-campus-security. Made from the name when the
+                                                   -- group is first recorded and never changed after
+    first_seen_at   TEXT    NOT NULL,              -- RFC3339 UTC
+    updated_at      TEXT    NOT NULL               -- RFC3339 UTC, when name or community was last written
+);
 
 -- One row per media file. Each references the message it belongs to.
 CREATE TABLE IF NOT EXISTS message_media_files (
@@ -52,7 +72,7 @@ CREATE TABLE IF NOT EXISTS message_media_files (
     caption           TEXT,                        -- this file's caption, if any
     file_name         TEXT,                        -- original file name (documents only)
     relative_path     TEXT,                        -- saved file, relative to the media dir, '/'-separated,
-                                                   -- e.g. 20261012T053508Z_3A37298F72373DFA1114.jpg
+                                                   -- e.g. preschool/20261012T053508Z_3A37298F72373DFA1114.jpg
     mime              TEXT,
     size              INTEGER,                     -- bytes
     sha256            TEXT,                        -- hex sha256 of the saved file

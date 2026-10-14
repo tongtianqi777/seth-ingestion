@@ -109,10 +109,12 @@ func columns(ctx context.Context, q interface {
 	return cols, rows.Err()
 }
 
-// BackfillSender sets sender on rows from phone that predate the sender column.
-func (s *Store) BackfillSender(ctx context.Context, phone, sender string) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE messages SET sender = ? WHERE sender = '' AND sender_phone = ?`, sender, phone)
+// BackfillSender sets sender on rows that predate the sender column, using the
+// sender's display name, or else their phone number or JID.
+func (s *Store) BackfillSender(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE messages SET sender = COALESCE(NULLIF(sender_name, ''), '+' || NULLIF(sender_phone, ''), sender_jid)
+		WHERE sender = ''`)
 	if err != nil {
 		return 0, err
 	}
@@ -200,6 +202,85 @@ func (s *Store) MigrateLegacyMedia(ctx context.Context, mediaDir string) (int, e
 		return 0, err
 	}
 	return len(found), tx.Commit()
+}
+
+// Group is a monitored WhatsApp group, stored in chat_groups.
+type Group struct {
+	JID            string
+	Name           string
+	CommunityJID   string
+	CommunityName  string
+	IsAnnouncement bool
+	// MediaFolder is the group's folder within the media dir. SaveGroup treats
+	// it as the preferred folder for a new group and returns the one in use.
+	MediaFolder string
+}
+
+// SaveGroup records g in chat_groups and returns it as stored.
+//
+// A new group gets g.MediaFolder, or "<folder>-2", "<folder>-3", … if a
+// folder with that name (ignoring case) already belongs to another group. An
+// existing group keeps its folder, so a renamed group's files stay together;
+// only its name and community are updated.
+func (s *Store) SaveGroup(ctx context.Context, g Group) (Group, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return g, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	var folder string
+	err = tx.QueryRowContext(ctx, `SELECT media_folder FROM chat_groups WHERE group_jid = ?`, g.JID).Scan(&folder)
+	switch {
+	case err == sql.ErrNoRows:
+		if folder, err = freeFolder(ctx, tx, g.MediaFolder); err != nil {
+			return g, err
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO chat_groups (
+				group_jid, name, community_jid, community_name, is_announcement, media_folder, first_seen_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			g.JID, g.Name, nullable(g.CommunityJID), nullable(g.CommunityName), g.IsAnnouncement, folder, now, now)
+	case err == nil:
+		_, err = tx.ExecContext(ctx, `
+			UPDATE chat_groups SET name = ?, community_jid = ?, community_name = ?, is_announcement = ?, updated_at = ?
+			WHERE group_jid = ?`,
+			g.Name, nullable(g.CommunityJID), nullable(g.CommunityName), g.IsAnnouncement, now, g.JID)
+	}
+	if err != nil {
+		return g, err
+	}
+	g.MediaFolder = folder
+	return g, tx.Commit()
+}
+
+// freeFolder returns want, or want with a numbered suffix, whichever is the
+// first not yet used by any group. media_folder compares without case, as the
+// macOS file system does.
+func freeFolder(ctx context.Context, tx *sql.Tx, want string) (string, error) {
+	for i := 1; i <= 1000; i++ {
+		folder := want
+		if i > 1 {
+			folder = fmt.Sprintf("%s-%d", want, i)
+		}
+		var taken bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM chat_groups WHERE media_folder = ?)`, folder).Scan(&taken); err != nil {
+			return "", err
+		}
+		if !taken {
+			return folder, nil
+		}
+	}
+	return "", fmt.Errorf("no free media folder name for %q", want)
+}
+
+// RenameGroup updates a group's name. Its media folder doesn't change.
+func (s *Store) RenameGroup(ctx context.Context, groupJID, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE chat_groups SET name = ?, updated_at = ? WHERE group_jid = ?`,
+		name, time.Now().UTC().Format(time.RFC3339), groupJID)
+	return err
 }
 
 // MediaFileExists reports whether a file carried by WhatsApp message
