@@ -117,6 +117,16 @@ Press **Start** under **Data feed**. When it says **Serving**, agents can connec
 | Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` | Where photos and other files are saved, in a folder per group |
 | Feed address | `127.0.0.1:8080` | Where the data feed listens. `0.0.0.0:8080` opens it to your network, with no login |
 
+### At a glance
+
+Below the controls, the **At a glance** panel shows how the ingestion is doing: messages and media files saved, failed downloads, the newest message, and a per-group breakdown. It reads the database directly (read-only), so it works even when everything is stopped.
+
+It also shows **storage**: how much disk the ingestion takes (the media folder plus the database and WhatsApp session) and how much space is left on this Mac, with a warning when free space runs low. Media piles up over time, so keep an eye on it. Sizes come from the files on disk and refresh every 30 seconds.
+
+<p align="center">
+  <img src="docs/assets/dashboard-metrics.png" alt="The At a glance panel with message and media numbers and a per-group table" width="720">
+</p>
+
 Both services always use the same folders, so the feed serves exactly what the ingestion records. The settings can only be changed while both are stopped. Relative paths are relative to this repo, and the page shows the full path for each. The settings are saved in `dashboard.json`.
 
 > [!NOTE]

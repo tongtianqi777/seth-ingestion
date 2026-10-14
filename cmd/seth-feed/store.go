@@ -5,13 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
-
 	"github.com/tianqitong/seth-ingestion/internal/grouplist"
+	"github.com/tianqitong/seth-ingestion/internal/readonly"
 )
 
 // reader runs read-only queries against the message database.
@@ -22,19 +20,9 @@ type reader struct {
 // openReader opens the message database read-only. seth-ingestion (or
 // seth-sim) is the only writer; this connection can't change anything.
 func openReader(path string) (*reader, error) {
-	conn, err := sql.Open("sqlite3", "file:"+path+"?mode=ro&_busy_timeout=5000")
+	conn, err := readonly.Open(path, 5000)
 	if err != nil {
 		return nil, err
-	}
-	conn.SetMaxOpenConns(8)
-	if err := conn.Ping(); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	var tables int
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('messages', 'chat_groups', 'message_media_files')`).Scan(&tables); err != nil || tables != 3 {
-		conn.Close()
-		return nil, fmt.Errorf("%s isn't a seth-ingestion message database", path)
 	}
 	return &reader{db: conn}, nil
 }

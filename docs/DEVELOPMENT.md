@@ -122,6 +122,8 @@ The tests don't need a WhatsApp connection:
 
 ### The dashboard
 
+The **At a glance** panel is served by `cmd/seth-dashboard/metrics.go` (`GET /api/metrics`), which opens the database through `internal/readonly` (`mode=ro`, one read transaction, shared with seth-feed) so it works with the services stopped. `storage.go` adds the disk numbers: it walks the media and data folders for real sizes (cached 30 seconds) and calls `statfs` for free space on the disk holding the media folder. Tests are in `metrics_test.go`, including reads while another connection writes.
+
 `seth-dashboard` is a wrapper. It runs `./run.sh` and `./feed.sh` as child processes, each in its own process group, with arguments built from the settings, and stops them with SIGTERM, as Ctrl+C would. It never imports the ingestion or feed code.
 
 To show the QR code and the link status, it starts the ingestion with `-status-lines`. That flag makes seth-ingestion also print machine-readable lines on stdout, alongside its usual output:

@@ -77,6 +77,27 @@
   .tabs button[aria-selected="true"] { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
   pre { margin: 0; background: var(--code-bg); border-radius: 10px; padding: 12px; height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
   .saved { color: var(--ok); font-size: 13px; font-weight: 600; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 760px) { .tiles { grid-template-columns: 1fr 1fr; } }
+  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .tile .label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .tile .value { font-size: 28px; font-weight: 600; color: var(--heading); line-height: 1.2; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .value.small { font-size: 20px; padding-top: 6px; }
+  .tile .extra { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .tile .extra.warn { color: var(--warn); font-weight: 600; }
+  table.groups { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+  table.groups th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  table.groups td { padding: 7px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  table.groups tr:last-child td { border-bottom: 0; }
+  table.groups .num { text-align: right; white-space: nowrap; }
+  table.groups .when { color: var(--muted); white-space: nowrap; }
+  .share { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .meter { display: block; width: 90px; height: 6px; border-radius: 3px; background: var(--off-bg); overflow: hidden; }
+  .share .count { min-width: 4ch; text-align: right; }
+  .meter > span { display: block; height: 100%; border-radius: 3px; background: var(--green); }
+  @media (max-width: 600px) { .meter, table.groups .hide-sm { display: none; } }
+  .failed { color: var(--warn); font-weight: 600; }
+  .empty { color: var(--muted); margin: 6px 0 0; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -126,6 +147,35 @@
     </div>
     <p id="feed-note" class="note"></p>
     <div id="feed-error" class="error" hidden></div>
+  </section>
+
+  <section class="card wide" aria-labelledby="met-title">
+    <div class="row">
+      <div>
+        <h2 id="met-title">At a glance</h2>
+        <p class="sub" style="margin-bottom:12px">What's in the database now. Read directly from it, so it works whether or not the services are running.</p>
+      </div>
+    </div>
+    <div id="met-empty" class="empty" hidden></div>
+    <div id="met-body" hidden>
+      <div class="tiles" id="storage-tiles">
+        <div class="tile"><div class="label">Used by ingestion</div><div class="value" id="s-used">0</div><div class="extra" id="s-split"></div></div>
+        <div class="tile"><div class="label">Free on this Mac</div><div class="value" id="s-free">—</div><div class="extra" id="s-total"></div></div>
+        <div class="tile" style="grid-column: span 2"><div class="label">Disk usage</div><div class="meter" style="margin-top:14px" aria-hidden="true"><span id="s-fill" style="width:0"></span></div><div class="extra" id="s-note" style="margin-top:8px"></div></div>
+      </div>
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><div class="label">Messages</div><div class="value" id="m-messages">0</div><div class="extra" id="m-24h"></div></div>
+        <div class="tile"><div class="label">Media files</div><div class="value" id="m-media">0</div><div class="extra" id="m-bytes"></div></div>
+        <div class="tile"><div class="label">Failed downloads</div><div class="value" id="m-failed">0</div><div class="extra" id="m-failed-pct"></div></div>
+        <div class="tile"><div class="label">Newest message</div><div class="value small" id="m-newest">—</div><div class="extra" id="m-newest-at"></div></div>
+      </div>
+      <table class="groups">
+        <caption class="sr">Messages and media files per group</caption>
+        <thead><tr><th scope="col">Group</th><th scope="col" class="num">Messages</th><th scope="col" class="num">Files</th><th scope="col" class="num">Failed</th><th scope="col" class="hide-sm">Last message</th></tr></thead>
+        <tbody id="m-groups"></tbody>
+      </table>
+      <p class="note" id="m-read"></p>
+    </div>
   </section>
 
   <section class="card wide" aria-labelledby="set-title">
@@ -303,8 +353,104 @@ for (const name of ["ingestion", "feed"]) {
   };
 }
 
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  const days = Math.round(s / 86400);
+  return days === 1 ? "1 day ago" : days + " days ago";
+}
+const when = (iso) => new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const num = (n) => n.toLocaleString();
+function bytes(n) {
+  const units = ["bytes", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + units[i];
+}
+
+function td(text, cls) {
+  const cell = document.createElement("td");
+  if (cls) cell.className = cls;
+  cell.textContent = text;
+  return cell;
+}
+
+function renderStorage(s) {
+  if (!s) return;
+  $("s-used").textContent = bytes(s.used_bytes);
+  $("s-split").textContent = bytes(s.media_bytes) + " media · " + bytes(s.data_bytes) + " database";
+  $("s-free").textContent = s.disk_total ? bytes(s.disk_free) : "—";
+  $("s-total").textContent = s.disk_total ? "of " + bytes(s.disk_total) : (s.error || "");
+  const usedPct = s.disk_total ? 100 * (s.disk_total - s.disk_free) / s.disk_total : 0;
+  const ingestPct = s.disk_total ? 100 * s.used_bytes / s.disk_total : 0;
+  $("s-fill").style.width = Math.max(ingestPct, ingestPct > 0 ? 1 : 0) + "%";
+  const low = s.disk_total && (s.disk_free < 5 * 1024 ** 3 || s.disk_free / s.disk_total < 0.1);
+  $("s-note").textContent = s.disk_total
+    ? "The ingestion is " + ingestPct.toFixed(1) + "% of the disk; the disk is " + usedPct.toFixed(0) + "% full." + (low ? " Space is running low: move or delete old media." : "")
+    : "";
+  $("s-note").className = "extra" + (low ? " warn" : "");
+  $("s-free").parentElement.classList.toggle("low", !!low);
+}
+
+function renderMetrics(m) {
+  $("met-empty").hidden = m.available;
+  $("met-body").hidden = !m.available;
+  if (!m.available) {
+    $("met-empty").textContent = "No data yet. Start the WhatsApp ingestion and it creates the database at " + m.database + ".";
+    return;
+  }
+  $("m-messages").textContent = num(m.messages);
+  $("m-24h").textContent = num(m.messages_last_24h) + " in the last 24 hours";
+  $("m-media").textContent = num(m.media_files);
+  $("m-bytes").textContent = bytes(m.media_bytes) + " saved";
+  $("m-failed").textContent = num(m.media_failed);
+  const pct = m.media_files ? Math.round(100 * m.media_failed / m.media_files) : 0;
+  $("m-failed-pct").textContent = m.media_failed ? pct + "% of files couldn't be downloaded" : "Every file downloaded";
+  $("m-failed-pct").className = "extra" + (m.media_failed ? " warn" : "");
+  $("m-newest").textContent = m.newest_sent_at ? ago(m.newest_sent_at) : "—";
+  $("m-newest-at").textContent = m.newest_sent_at ? "Sent " + when(m.newest_sent_at) : "No messages yet";
+
+  renderStorage(m.storage);
+  const most = Math.max(1, ...m.groups.map((g) => g.messages));
+  const rows = m.groups.map((g) => {
+    const tr = document.createElement("tr");
+    tr.append(td(g.name));
+    const count = document.createElement("td");
+    count.className = "num";
+    const share = document.createElement("div");
+    share.className = "share";
+    const bar = document.createElement("span");
+    bar.className = "meter";
+    bar.setAttribute("aria-hidden", "true");
+    const fill = document.createElement("span");
+    fill.style.width = (100 * g.messages / most) + "%";
+    bar.append(fill);
+    const n = document.createElement("span");
+    n.className = "count";
+    n.textContent = num(g.messages);
+    share.append(bar, n);
+    count.append(share);
+    tr.append(count, td(num(g.media_files), "num"));
+    tr.append(td(g.media_failed ? num(g.media_failed) : "–", "num" + (g.media_failed ? " failed" : "")));
+    tr.append(td(g.last_message_at ? ago(g.last_message_at) : "No messages yet", "when hide-sm"));
+    if (g.last_message_at) tr.lastChild.title = when(g.last_message_at);
+    return tr;
+  });
+  $("m-groups").replaceChildren(...rows);
+  $("m-read").textContent = "Updated " + new Date(m.read_at).toLocaleTimeString() + ". Counts only include the recorded groups.";
+}
+
+async function refreshMetrics() {
+  try { renderMetrics(await api("api/metrics")); }
+  catch (e) { $("m-read").textContent = "Couldn't read the database just now; trying again shortly."; }
+}
+
 refresh();
 setInterval(refresh, 1500);
+refreshMetrics();
+setInterval(refreshMetrics, 5000);
 </script>
 </body>
 </html>

@@ -266,3 +266,11 @@ func TestFeedURL(t *testing.T) {
 		}
 	}
 }
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

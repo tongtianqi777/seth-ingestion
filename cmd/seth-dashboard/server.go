@@ -78,6 +78,7 @@ type dashboard struct {
 	config    Config
 	ingestion *service
 	feed      *service
+	storage   storageCache
 }
 
 func loadConfig(path string) (Config, error) {
@@ -115,6 +116,7 @@ func (d *dashboard) handler() http.Handler {
 	mux.Handle("GET /", http.FileServerFS(assets))
 	mux.HandleFunc("GET /api/status", d.status)
 	mux.HandleFunc("GET /api/qr.png", d.qrImage)
+	mux.HandleFunc("GET /api/metrics", d.metrics)
 	mux.HandleFunc("GET /api/config", d.getConfig)
 	mux.HandleFunc("PUT /api/config", d.putConfig)
 	mux.HandleFunc("POST /api/{service}/{action}", d.control)
