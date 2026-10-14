@@ -1,26 +1,29 @@
+<img src="assets/seth-crest.png" alt="Seth crest" width="64" align="right">
+
 # Development guide
 
-This guide covers how seth-ingestion is built and how to change it. For setup and usage, see the [README](../README.md). For the tables, how messages become rows, and schema upgrades, see [DATABASE.md](DATABASE.md).
+How seth-ingestion works inside, and how to change and test it. For setup and usage, see the [README](../README.md). For the tables and how messages become rows, see [DATABASE.md](DATABASE.md). For what downstream agents depend on, see [CONSUMING.md](CONSUMING.md).
+
+**On this page:** [Layout](#layout) · [How it works](#how-it-works) · [Database](#database) · [Building and checking](#building-and-checking) · [Dependencies](#dependencies) · [Caveats](#caveats)
 
 ## Layout
 
-```
-main.go          flags/env config, opening the stores, QR login, signal handling, finding the groups once connected
-groups.go        reading groups.txt, picking the community's listed groups, media folder names
-ingest.go        event handling: filtering by group, parsing messages, naming senders, downloading media
-groups.txt       the groups to record (read at startup, not compiled in)
-db/schema.sql    table DDL (embedded into the binary and applied on startup)
-db/db.go         SQLite access for the message store, plus migrations from older schemas
-db/db_test.go    tests for album grouping, groups, sender backfill and the legacy media migration
-*_test.go        tests for group selection, folder names and the ingester (against temp SQLite stores)
-run.sh           entry script: rebuilds when sources change, then runs bin/seth-ingestion
-docs/            this guide and DATABASE.md (schema and storage logic)
-data/            runtime state (git-ignored)
-  whatsmeow-session.db   whatsmeow's device keys and session, managed by whatsmeow
-  messages.db            our ingested messages
-```
+| Path | What's there |
+|---|---|
+| `main.go` | Flags and environment, opening the stores, QR login, signal handling, finding the groups once connected |
+| `groups.go` | Reading `groups.txt`, picking the community's listed groups, media folder names |
+| `ingest.go` | Event handling: filtering by group, parsing messages, naming senders, downloading media |
+| `groups.txt` | The groups to record. Read at startup, not compiled in |
+| `db/schema.sql` | Table definitions, embedded into the binary and applied on startup |
+| `db/db.go` | SQLite access for the message store, plus upgrades from older schemas |
+| `*_test.go`, `db/db_test.go` | Tests. See [Building and checking](#building-and-checking) |
+| `run.sh` | Entry script: rebuilds when sources change, then runs `bin/seth-ingestion` |
+| `docs/` | These guides, and the logo in `docs/assets/` |
+| `data/` | Runtime state, ignored by git: `messages.db` (the recorded messages) and `whatsmeow-session.db` (the linked device's keys and session, managed by whatsmeow) |
 
 ## How it works
+
+In short: whatsmeow delivers WhatsApp events, `Ingester.HandleEvent` queues the ones that might matter, and a single worker turns them into rows and files once it knows which groups to record.
 
 ```mermaid
 flowchart TD
@@ -87,6 +90,9 @@ WhatsApp is moving users from phone-number JIDs (`14125778174@s.whatsapp.net`) t
 
 Schema, write rules and upgrades are documented in [DATABASE.md](DATABASE.md). When you change the schema, update `db/schema.sql`, the migration steps in `db/db.go`, and DATABASE.md together.
 
+> [!IMPORTANT]
+> AI agents read this database while the program runs, and they rely on the promises in [CONSUMING.md](CONSUMING.md#what-you-can-rely-on): rows are never deleted, keys never change, `rowid` and `id` only grow, and the schema only gains columns and tables. A change that breaks one of these needs the agents updated with it, and a note in CONSUMING.md.
+
 ## Building and checking
 
 ```bash
@@ -104,11 +110,12 @@ The tests don't need a WhatsApp connection:
 
 Successful media downloads aren't tested, because they need WhatsApp's servers. `mediaRelPath` covers where the files go.
 
-To test by hand, link a device with a separate `-data-dir` so the real session is left alone. Then send a text, an image, an album of 2–3 images, a voice note, a document, a reply and an edit in one of the listed groups (a test group of your own works, if you add it to a copy of `groups.txt`), and check that a message in an unlisted group isn't recorded:
-
-```bash
-./run.sh -data-dir ./data-dev -media-dir /tmp/seth-media -groups-file groups-dev.txt -log-level DEBUG
-```
+> [!TIP]
+> To test by hand, link a device with a separate `-data-dir` so the real session is left alone. Then send a text, an image, an album of 2–3 images, a voice note, a document, a reply and an edit in one of the listed groups (a test group of your own works, if you add it to a copy of `groups.txt`), and check that a message in an unlisted group isn't recorded:
+>
+> ```bash
+> ./run.sh -data-dir ./data-dev -media-dir /tmp/seth-media -groups-file groups-dev.txt -log-level DEBUG
+> ```
 
 ## Dependencies
 
@@ -126,7 +133,9 @@ go get go.mau.fi/whatsmeow@latest && go mod tidy && go build ./...
 
 ## Caveats
 
-- This is an unofficial client. WhatsApp may rate-limit or ban accounts that behave unusually. Passive reading like this is low risk, but avoid running several linked instances at once.
+> [!WARNING]
+> whatsmeow is an unofficial WhatsApp client. WhatsApp may rate-limit or ban accounts that behave unusually. Passive reading like this is low risk, but don't run several linked instances at once.
+
 - A linked device is logged out if the phone doesn't come online for about 14 days.
 - History sync is best-effort. How much history arrives, and whether its media can still be downloaded, is up to WhatsApp.
 - Edits that arrive in history sync are a known gap. whatsmeow's `ParseWebMessage` gives them the ID and content of the message they edit, so they aren't stored as `edit` rows: if the original is already stored, the edit is treated as a repeat of it and dropped; otherwise it's stored as the original, with the edited text. Live edits are stored as `edit` rows.

@@ -1,8 +1,15 @@
+<img src="assets/seth-crest.png" alt="Seth crest" width="64" align="right">
+
 # Database
 
-This document describes how seth-ingestion stores what it captures: the tables and their columns, how each kind of WhatsApp message becomes rows, the rules for writing those rows, and how older databases are upgraded. For setup and usage, see the [README](../README.md). For the rest of the code, see the [development guide](DEVELOPMENT.md).
+The reference for everything seth-ingestion stores: the tables and their columns, how each kind of WhatsApp message becomes rows, the rules for writing them, and how older databases are upgraded.
 
-The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in [db/db.go](../db/db.go) and `Ingester.process` in [ingest.go](../ingest.go).
+**On this page:** [Overview](#overview) · [Conventions](#conventions) · [Tables](#tables) · [Message types](#message-types) · [Albums](#albums) · [Write rules](#write-rules) · [Media files on disk](#media-files-on-disk) · [Example queries](#example-queries) · [Upgrades](#schema-creation-and-upgrades)
+
+> [!TIP]
+> Building an AI agent that reads this data? Start with [CONSUMING.md](CONSUMING.md). It shows how to follow new messages and what you can rely on, and links back here for the details.
+
+The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in [db/db.go](../db/db.go) and `Ingester.process` in [ingest.go](../ingest.go). For setup, see the [README](../README.md); for the rest of the code, the [development guide](DEVELOPMENT.md).
 
 ## Overview
 
@@ -10,9 +17,12 @@ The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in 
 |---|---|---|---|
 | Message database | `data/messages.db` (`-data-dir`) | seth-ingestion | `chat_groups`, `messages` and `message_media_files` |
 | Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` (`-media-dir`) | seth-ingestion | the downloaded files that `message_media_files` points to, in a folder per group |
-| Session database | `data/whatsmeow-session.db` | whatsmeow | device keys, the login session and contact mappings. **Don't write to it.** whatsmeow creates and upgrades it itself |
+| Session database | `data/whatsmeow-session.db` | whatsmeow | device keys, the login session and contact mappings |
 
-Both databases are SQLite. The message database runs in WAL mode, so it's normal to see `messages.db-wal` and `messages.db-shm` next to it. You can read the database with `sqlite3` or any SQLite viewer while the program is running.
+Both databases are SQLite. The message database runs in WAL mode, so it's normal to see `messages.db-wal` and `messages.db-shm` next to it. You can read it with `sqlite3` or any SQLite viewer while the program is running.
+
+> [!WARNING]
+> Never write to `whatsmeow-session.db`. whatsmeow creates and upgrades it itself, and it holds the keys of the linked device.
 
 ```mermaid
 erDiagram
@@ -76,6 +86,8 @@ To get a message's group, join on `chat_groups.group_jid = messages.chat_jid`. T
 
 One row per WhatsApp message in a monitored group. Your own messages are recorded the same way as everyone else's.
 
+Like every ordinary SQLite table, `messages` also has a built-in `rowid`. Each new message gets the next one, and since rows are never deleted, it only grows. That makes it the cursor for following new messages; see [CONSUMING.md](CONSUMING.md#following-new-messages).
+
 | Column | Type | Null? | Description |
 |---|---|---|---|
 | `chat_jid` | TEXT | no | The group the message was sent in (`…@g.us`); joins to `chat_groups.group_jid`. On rows from the earlier single-contact version, the contact's JID. **Primary key**, with `message_id` |
@@ -95,7 +107,7 @@ One row per WhatsApp message in a monitored group. Your own messages are recorde
 | `source` | TEXT | no | `live` if received while running, or `history` if it came from the chat history WhatsApp sends after linking |
 | `raw_json` | TEXT | yes | The full WhatsApp message as protobuf JSON. Used to re-process messages, and to read fields that have no column of their own. `NULL` only for an album whose album message hasn't arrived yet |
 
-Indexes:
+**Indexes**
 
 | Index | Columns | Used for |
 |---|---|---|
@@ -111,7 +123,7 @@ One row per media file that a message carried, whether or not the download worke
 
 | Column | Type | Null? | Description |
 |---|---|---|---|
-| `id` | INTEGER | no | Row ID. **Primary key** |
+| `id` | INTEGER | no | Row ID. **Primary key**. Each new file gets the next one, so it's also the cursor for following new files |
 | `chat_jid` | TEXT | no | **Foreign key**, with `message_id`, to the `messages` row this file belongs to |
 | `message_id` | TEXT | no | The `messages` row this file is listed under. For an album item, this is the album's ID. See [`message_id` vs `source_message_id`](#message_id-vs-source_message_id) |
 | `source_message_id` | TEXT | no | The ID of the WhatsApp message that delivered this file. Usually the same as `message_id`. For an album item, it's that item's own ID. **Unique**, with `chat_jid`. See [`message_id` vs `source_message_id`](#message_id-vs-source_message_id) |
@@ -126,7 +138,7 @@ One row per media file that a message carried, whether or not the download worke
 | `error` | TEXT | yes | Why the download or save failed. `NULL` when the file was saved |
 | `ingested_at` | TEXT | no | When the row was written |
 
-Keys and indexes:
+**Keys and indexes**
 
 - **Foreign key** `(chat_jid, message_id)` → `messages (chat_jid, message_id)`, with `ON DELETE CASCADE`. Deleting a message deletes its media file rows. **It does not delete the files on disk.** Foreign keys are enforced, because the program opens the database with `_foreign_keys=on`.
 - **Unique** `(chat_jid, source_message_id)`, so a file delivered by one WhatsApp message can't be recorded twice.
@@ -197,7 +209,8 @@ sequenceDiagram
 
 If the album message arrives first, it creates the row and the items just add files to it. Either way, the result is one row with `media_file_count` equal to the number of items received.
 
-The album handling is based on WhatsApp's message definitions and is covered by unit tests. It hasn't yet been checked against a real album sent from a phone.
+> [!NOTE]
+> The album handling is based on WhatsApp's message definitions and is covered by unit tests. It hasn't yet been checked against a real album sent from a phone.
 
 ## Write rules
 
@@ -232,7 +245,7 @@ This happens when an album's items arrive before the album message, and when his
 
 ## Example queries
 
-Run these with `sqlite3 -header -column data/messages.db "<query>"`.
+Run these with `sqlite3 -readonly -header -column data/messages.db "<query>"`, or from any SQLite client.
 
 Latest messages, with their groups:
 
@@ -306,7 +319,7 @@ Messages with their latest edit applied:
 ```sql
 SELECT m.message_id, m.sent_at,
        COALESCE((SELECT e.body FROM messages e
-                 WHERE e.message_type = 'edit' AND e.edit_target_id = m.message_id
+                 WHERE e.chat_jid = m.chat_jid AND e.message_type = 'edit' AND e.edit_target_id = m.message_id
                  ORDER BY e.sent_at DESC LIMIT 1), m.body) AS current_body
 FROM messages m
 WHERE m.message_type <> 'edit'
@@ -335,13 +348,12 @@ flowchart TD
     Sender --> Legacy["Store.MigrateLegacyMedia:<br/>move old media columns into message_media_files,<br/>then drop them (one transaction)"]
 ```
 
-- **`schema.sql` always describes the full current schema.** A new database is created from it directly. Every statement is `IF NOT EXISTS`, so running it again is harmless.
+- **`schema.sql` always describes the full current schema.** A new database is created from it directly, and an older one gets any tables and indexes it's missing, such as `chat_groups`. Every statement is `IF NOT EXISTS`, so running it again is harmless.
 - **`migrate` runs before `schema.sql`.** An index in `schema.sql` may refer to a column that an older table doesn't have yet. Adding the column first lets the index be created.
-- **`schema.sql`** also creates `chat_groups`, and the `chat_jid, sent_at` index, on databases that don't have them yet.
 - **`BackfillSender`** fills in `sender` on rows written before the column existed, with the row's `sender_name`, or else `+<sender_phone>`, or else `sender_jid`.
 - **`MigrateLegacyMedia`** upgrades databases from versions that stored at most one image per message directly on `messages`, in the columns `media_path`, `image_relative_path`, `media_mime`, `media_size`, `media_sha256` and `media_error`. It copies each image into `message_media_files`, drops those columns and recomputes `media_file_count`, all in one transaction. It needs the media folder to work out relative paths, so `main.go` calls it after `Open`. Once the old columns are gone it does nothing.
 
-To change the schema:
+### Changing the schema
 
 - **Adding a column:** add it to the `CREATE TABLE` in `schema.sql`. Then add an `ALTER TABLE … ADD COLUMN` step for it to `migrate` in [db/db.go](../db/db.go), so existing databases get it too. SQLite only allows `NOT NULL` on an added column if it has a default. If existing rows need a real value, backfill them after opening, the way `BackfillSender` is called from `main.go`.
 - **Restructuring:** follow `MigrateLegacyMedia`. Detect the old shape from `pragma_table_info`, copy the data, then `DROP COLUMN`, all inside one transaction. `DROP COLUMN` needs SQLite 3.35 or later, and the bundled SQLite is 3.53. If several of these build up, switch to `PRAGMA user_version` with numbered steps.
