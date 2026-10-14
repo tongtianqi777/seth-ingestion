@@ -20,9 +20,11 @@ How seth-ingestion works inside, and how to change and test it. For setup and us
 | `internal/grouplist/` | The groups-file format and the folder-name rule, shared by both programs |
 | `cmd/seth-sim/` | The simulator, which writes invented group traffic to `data-sim/` for testing clients. See [CONSUMING.md](CONSUMING.md#testing-with-simulated-data) |
 | `cmd/seth-feed/` | The read-only HTTP API for agents. See [CONSUMING.md](CONSUMING.md#http-api) |
-| `run.sh`, `sim.sh`, `feed.sh` | Entry scripts: rebuild when sources change, then run `bin/seth-ingestion`, `bin/seth-sim` or `bin/seth-feed` |
+| `cmd/seth-dashboard/` | The local control panel. The page itself is `static/index.html`, embedded in the binary |
+| `run.sh`, `sim.sh`, `feed.sh`, `dashboard.sh` | Entry scripts: rebuild when sources change, then run `bin/seth-ingestion`, `bin/seth-sim`, `bin/seth-feed` or `bin/seth-dashboard` |
 | `docs/` | These guides, and the logo in `docs/assets/` |
 | `data-sim/` | The simulator's database and media, ignored by git |
+| `dashboard.json` | The dashboard's saved settings, ignored by git |
 | `data/` | Runtime state, ignored by git: `messages.db` (the recorded messages) and `whatsmeow-session.db` (the linked device's keys and session, managed by whatsmeow) |
 
 ## How it works
@@ -115,6 +117,27 @@ The tests don't need a WhatsApp connection:
 - `cmd/seth-sim` tests check that simulated data is consistent (albums complete, replies and edits point at real messages, files exist where `relative_path` says), that a seed repeats exactly, and that the simulator refuses to write to a real database.
 
 - `cmd/seth-feed` tests build a database with the `db` package, serve it with `httptest`, and check every endpoint: paging, the follow cursor (including an album photo that arrives after its message was read), edits applied and replies resolved, search, media bytes and content types, failed downloads, path traversal, `/events` only on simulated data, and that the connection can't write.
+
+- `cmd/seth-dashboard` tests run small fake scripts in place of `run.sh` and `feed.sh`. They check that both services get the same folders, that the state follows the `@seth` lines, that QR art and colour codes stay out of the output, that `/api/qr.png` is a real PNG, that stopping sends SIGTERM, that the settings can't change while a service runs, and that requests without the dashboard's header or for another host name are refused. A root-package test covers `statusLine`.
+
+### The dashboard
+
+`seth-dashboard` is a wrapper. It runs `./run.sh` and `./feed.sh` as child processes, each in its own process group, with arguments built from the settings, and stops them with SIGTERM, as Ctrl+C would. It never imports the ingestion or feed code.
+
+To show the QR code and the link status, it starts the ingestion with `-status-lines`. That flag makes seth-ingestion also print machine-readable lines on stdout, alongside its usual output:
+
+| Line | Meaning |
+|---|---|
+| `@seth qr <code>` | A new QR code to scan; the dashboard draws it with `rsc.io/qr` (the library behind the terminal QR code) |
+| `@seth status linked` | The code was scanned |
+| `@seth status qr_timeout` | Nobody scanned in time; the program exits |
+| `@seth status connected` | Connected to WhatsApp |
+| `@seth status recording <n>` | Found the groups and is recording `n` of them |
+| `@seth status unlinked` | Unlinked on the phone; a new QR code follows |
+
+Without the flag, nothing changes. If you add a state, print it with `statusLine` in `main.go` and handle it in `handleLine` in `cmd/seth-dashboard/service.go`. The feed counts as **Serving** once it prints `Listening on`.
+
+The dashboard only accepts requests whose `Host` is `127.0.0.1`, `localhost` or `::1`, which blocks DNS rebinding. Anything that changes state (`POST`, `PUT`) also needs the `X-Seth-Dashboard: 1` header. A page on another site can't add that header without the dashboard's permission, which it never gives.
 
 ### The HTTP API
 

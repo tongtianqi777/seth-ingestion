@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -33,6 +34,7 @@ func main() {
 		mediaDir   = flag.String("media-dir", env("SETH_MEDIA_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "directory to save images and other media into, in a folder per group")
 		logLevel   = flag.String("log-level", env("SETH_LOG_LEVEL", "INFO"), "DEBUG, INFO, WARN or ERROR")
 	)
+	flag.BoolVar(&statusLines, "status-lines", env("SETH_STATUS_LINES", "") != "", "also print machine-readable \"@seth ...\" lines (the QR code and link status) for seth-dashboard")
 	flag.Parse()
 
 	if err := run(*community, *groupsFile, *dataDir, *mediaDir, *logLevel); err != nil {
@@ -92,6 +94,7 @@ func run(community, groupsFile, dataDir, mediaDir, logLevel string) error {
 		// whatsmeow has already deleted the revoked session, so the next
 		// GetFirstDevice returns a fresh device and login shows a new QR code.
 		log.Warnf("This device was unlinked from WhatsApp. Scan the new QR code to link it again, or press Ctrl+C to quit.")
+		statusLine("status", "unlinked")
 	}
 }
 
@@ -122,6 +125,7 @@ func runSession(ctx context.Context, device *store.Device, cfg sessionConfig) (r
 		switch evt := evt.(type) {
 		case *events.Connected:
 			log.Infof("Connected as %s", client.Store.ID.User)
+			statusLine("status", "connected")
 			signalOnce(connected)
 		case *events.LoggedOut:
 			log.Warnf("Logged out by WhatsApp (reason: %s)", evt.Reason)
@@ -175,6 +179,7 @@ func runSession(ctx context.Context, device *store.Device, cfg sessionConfig) (r
 		sort.Strings(names)
 		ingester.SetGroups(groups)
 		log.Infof("Recording %d groups: %s", len(names), strings.Join(names, ", "))
+		statusLine("status", "recording", strconv.Itoa(len(names)))
 		log.Infof("Messages -> %s, media -> %s. Press Ctrl+C to stop.", filepath.Join(cfg.dataDir, "messages.db"), cfg.mediaDir)
 	}
 }
@@ -200,11 +205,14 @@ func login(ctx context.Context, client *whatsmeow.Client, log waLog.Logger) erro
 		switch item.Event {
 		case whatsmeow.QRChannelEventCode:
 			qrterminal.GenerateHalfBlock(item.Code, qrterminal.L, os.Stdout)
+			statusLine("qr", item.Code)
 			fmt.Printf("(QR refreshes in %s)\n", item.Timeout)
 		case whatsmeow.QRChannelSuccess.Event:
 			log.Infof("Login successful")
+			statusLine("status", "linked")
 			return nil
 		case whatsmeow.QRChannelTimeout.Event:
+			statusLine("status", "qr_timeout")
 			return fmt.Errorf("QR code timed out; run again to get a new one")
 		case whatsmeow.QRChannelEventError:
 			return fmt.Errorf("pairing failed: %w", item.Error)
@@ -216,6 +224,26 @@ func login(ctx context.Context, client *whatsmeow.Client, log waLog.Logger) erro
 		return nil // Ctrl+C while waiting for the scan
 	}
 	return fmt.Errorf("login aborted")
+}
+
+// statusLines turns on statusLine. seth-dashboard sets it, to show the QR code
+// and the link status in the browser.
+var statusLines bool
+
+// statusLine prints a line such as "@seth qr <code>" or "@seth status
+// connected" on stdout, for seth-dashboard to read. It prints nothing unless
+// -status-lines is set. The words after "@seth" are:
+//
+//	qr <code>               a new QR code to scan (replaces the previous one)
+//	status linked           the QR code was scanned and the device is linked
+//	status qr_timeout       no one scanned the QR code in time; the program exits
+//	status connected        connected to WhatsApp
+//	status recording <n>    found the groups and is recording n of them
+//	status unlinked         the device was unlinked on the phone; a new QR code follows
+func statusLine(words ...string) {
+	if statusLines {
+		fmt.Println("@seth " + strings.Join(words, " "))
+	}
 }
 
 func env(key, fallback string) string {

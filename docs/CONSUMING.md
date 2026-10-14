@@ -47,6 +47,8 @@ It returns **the same logical view** as reading the database the way this guide 
 
 ### Running it
 
+You can start and stop it from the [dashboard](../README.md#the-dashboard), or from a terminal:
+
 ```bash
 ./feed.sh                       # serves data/messages.db on http://127.0.0.1:8080
 ./feed.sh -sim                  # serves the simulator's data-sim/ instead, for testing

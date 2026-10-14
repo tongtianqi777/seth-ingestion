@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seth Dashboard</title>
+<link rel="icon" href="seth-crest.png">
+<style>
+  /* The palette comes from the Seth logo: the shield's navy and blue, the tree's
+     green, the book's gold and the cream of the cross and pages. */
+  :root {
+    --navy: #002a46; --blue: #003e5d; --green: #739e30; --gold: #f1a618; --cream: #f0e9e0; --brown: #503820;
+    --bg: #f7f4ee; --card: #ffffff; --text: #10283a; --muted: #5a6875; --line: #e6dfd2; --heading: var(--navy);
+    --primary: var(--navy); --primary-hover: var(--blue); --primary-text: #ffffff; --link: var(--blue);
+    --ok-bg: #edf4e1; --ok: #48691a; --warn-bg: #fdf1d8; --warn: #7d5500; --off-bg: #efeae1; --off: #5b5d5f;
+    --bad-bg: #fbe7e4; --bad: #8f2d22; --code-bg: #f4f0e8;
+    --font: "Avenir Next", Avenir, "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #071622; --card: #0d2131; --text: #eef0f2; --muted: #9fb0bd; --line: #1c3446; --heading: var(--cream);
+      --primary: var(--green); --primary-hover: #86b33c; --primary-text: #0c1806; --link: #f5c35a;
+      --ok-bg: #1d3313; --ok: #b7dc84; --warn-bg: #3a2b0c; --warn: #f7cf78; --off-bg: #172b3a; --off: #b3c0ca;
+      --bad-bg: #3c1c18; --bad: #f3aa9f; --code-bg: #05101a;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--font); }
+  header { background: var(--navy); color: var(--cream); }
+  .bar { max-width: 1040px; margin: 0 auto; padding: 16px 20px; display: flex; align-items: center; gap: 18px; }
+  .bar .logo { height: 58px; width: auto; }
+  .bar .divider { width: 1px; align-self: stretch; margin: 6px 0; background: rgba(240, 233, 224, .25); }
+  .bar h1 { margin: 0; font-size: 21px; font-weight: 600; letter-spacing: .3px; color: var(--cream); }
+  .bar p { margin: 1px 0 0; font-size: 13px; color: var(--cream); opacity: .75; }
+  @media (max-width: 560px) { .bar .divider, .bar p { display: none; } .bar .logo { height: 46px; } }
+  .stripe { height: 4px; background: linear-gradient(90deg, var(--navy) 0 33%, var(--green) 33% 66%, var(--gold) 66%); }
+  main { max-width: 1040px; margin: 0 auto; padding: 22px 20px 40px; display: grid; gap: 18px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+  .wide { grid-column: 1 / -1; }
+  .card h2 { margin: 0 0 2px; font-size: 17px; font-weight: 600; color: var(--heading); }
+  .card .sub { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--off-bg); color: var(--off); }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad); }
+  .pill.busy::before { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .pill.busy::before { animation: none; } }
+  .spacer { flex: 1; }
+  button { font: inherit; font-weight: 600; border-radius: 9px; padding: 7px 16px; border: 1px solid transparent; cursor: pointer; }
+  button.start { background: var(--primary); color: var(--primary-text); }
+  button.start:not(:disabled):hover { background: var(--primary-hover); }
+  button.stop { background: transparent; color: var(--text); border-color: var(--line); }
+  button:disabled { opacity: .45; cursor: default; }
+  .qr { margin-top: 16px; display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; }
+  .qr img { width: 210px; height: 210px; image-rendering: pixelated; background: #fff; border-radius: 10px; padding: 6px; border: 1px solid var(--line); }
+  .qr ol { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  .qr ol b { color: var(--text); }
+  @media (max-width: 460px) { .qr { grid-template-columns: 1fr; justify-items: center; } }
+  .note { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
+  .error { margin: 12px 0 0; padding: 9px 12px; border-radius: 9px; background: var(--bad-bg); color: var(--bad); font-size: 13px; word-break: break-word; }
+  a { color: var(--link); }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+  input { width: 100%; font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+  button:focus-visible, .tabs button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  input:disabled { opacity: .6; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 3px; word-break: break-all; }
+  .settings { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
+  @media (max-width: 760px) { .settings { grid-template-columns: 1fr; } }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tabs button { background: transparent; color: var(--muted); border-color: var(--line); padding: 4px 12px; font-size: 13px; }
+  .tabs button[aria-selected="true"] { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+  pre { margin: 0; background: var(--code-bg); border-radius: 10px; padding: 12px; height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+  .saved { color: var(--ok); font-size: 13px; font-weight: 600; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <img class="logo" src="seth-logo-dark.png" alt="Seth Christian Education Institute">
+    <span class="divider" aria-hidden="true"></span>
+    <div>
+      <h1>Dashboard</h1>
+      <p>WhatsApp ingestion and the data feed for the school's AI agents</p>
+    </div>
+  </div>
+  <div class="stripe"></div>
+</header>
+
+<main>
+  <section class="card" aria-labelledby="ing-title">
+    <h2 id="ing-title">WhatsApp ingestion</h2>
+    <p class="sub">Records the Seth community's groups into the database.</p>
+    <div class="row">
+      <span id="ing-pill" class="pill" role="status">Stopped</span>
+      <span class="spacer"></span>
+      <button class="start" id="ing-start">Start</button>
+      <button class="stop" id="ing-stop">Stop</button>
+    </div>
+    <div id="ing-qr" class="qr" hidden>
+      <img id="ing-qr-img" alt="WhatsApp QR code to link this device">
+      <ol>
+        <li>Open <b>WhatsApp</b> on your phone.</li>
+        <li>Go to <b>Settings → Linked Devices → Link a Device</b>.</li>
+        <li>Scan this code. It refreshes every 20 seconds or so.</li>
+      </ol>
+    </div>
+    <p id="ing-note" class="note"></p>
+    <div id="ing-error" class="error" hidden></div>
+  </section>
+
+  <section class="card" aria-labelledby="feed-title">
+    <h2 id="feed-title">Data feed</h2>
+    <p class="sub">Serves the recorded messages to agents as a read-only JSON API.</p>
+    <div class="row">
+      <span id="feed-pill" class="pill" role="status">Stopped</span>
+      <span class="spacer"></span>
+      <button class="start" id="feed-start">Start</button>
+      <button class="stop" id="feed-stop">Stop</button>
+    </div>
+    <p id="feed-note" class="note"></p>
+    <div id="feed-error" class="error" hidden></div>
+  </section>
+
+  <section class="card wide" aria-labelledby="set-title">
+    <h2 id="set-title">Settings</h2>
+    <p class="sub">Both services use these, so the feed always serves what the ingestion records. Stop both to change them.</p>
+    <form id="settings">
+      <div class="settings">
+        <div>
+          <label for="data_dir">Data folder</label>
+          <input id="data_dir" name="data_dir" autocomplete="off" spellcheck="false">
+          <div class="hint" id="data_hint"></div>
+        </div>
+        <div>
+          <label for="media_dir">Media folder</label>
+          <input id="media_dir" name="media_dir" autocomplete="off" spellcheck="false">
+          <div class="hint" id="media_hint"></div>
+        </div>
+        <div>
+          <label for="feed_addr">Feed address</label>
+          <input id="feed_addr" name="feed_addr" autocomplete="off" spellcheck="false">
+          <div class="hint">127.0.0.1 keeps the feed on this Mac. 0.0.0.0 opens it to your network, with no login.</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="start" id="save" type="submit">Save settings</button>
+        <span id="save-msg" aria-live="polite"></span>
+      </div>
+      <div id="save-error" class="error" hidden></div>
+    </form>
+  </section>
+
+  <section class="card wide" aria-labelledby="log-title">
+    <h2 id="log-title">Output</h2>
+    <p class="sub">The latest lines each service printed.</p>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-ingestion" aria-selected="true">Ingestion</button>
+      <button role="tab" id="tab-feed" aria-selected="false">Feed</button>
+    </div>
+    <pre id="log" tabindex="0" aria-label="Service output"></pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let logTab = "ingestion", lastQR = "", settingsLoaded = false, editing = false;
+
+const ingestionStates = {
+  stopped: ["Stopped", ""],
+  starting: ["Starting…", "warn busy"],
+  waiting_for_scan: ["Scan the QR code", "warn busy"],
+  linked: ["Linked, connecting…", "warn busy"],
+  connected: ["Connected, finding the groups…", "ok busy"],
+  recording: ["Recording", "ok"],
+  unlinked: ["Unlinked, a new QR code is coming", "warn busy"],
+  qr_timeout: ["QR code expired", "bad"],
+};
+
+async function api(path, options = {}) {
+  options.headers = Object.assign({ "X-Seth-Dashboard": "1" }, options.headers || {});
+  const resp = await fetch(path, options);
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(body.error || resp.statusText);
+  return body;
+}
+
+function setPill(el, text, cls) {
+  el.textContent = text;
+  el.className = "pill " + (cls || "");
+}
+
+function showError(el, text) {
+  el.hidden = !text;
+  el.textContent = text || "";
+}
+
+function render(s) {
+  const ing = s.ingestion, feed = s.feed;
+  let [label, cls] = ingestionStates[ing.state] || [ing.state, ""];
+  if (ing.state === "recording" && ing.detail) label = "Recording " + ing.detail;
+  if (!ing.running && ing.exit_error) cls = "bad";
+  setPill($("ing-pill"), label, cls);
+  $("ing-start").disabled = ing.running;
+  $("ing-stop").disabled = !ing.running;
+  $("ing-qr").hidden = !ing.has_qr;
+  if (ing.has_qr && ing.qr_version !== lastQR) {
+    lastQR = ing.qr_version;
+    $("ing-qr-img").src = "api/qr.png?v=" + encodeURIComponent(lastQR);
+  }
+  $("ing-note").textContent = ing.state === "qr_timeout" ? "Nobody scanned the code in time. Press Start to get a new one."
+    : ing.running && ing.state === "starting" ? "Building and connecting. If this device is already linked, it connects without a QR code."
+    : ing.running ? "Started " + new Date(ing.started_at).toLocaleTimeString() + "." : "";
+  showError($("ing-error"), !ing.running && ing.exit_error);
+
+  const feedLabel = feed.state === "serving" ? "Serving" : feed.running ? "Starting…" : "Stopped";
+  setPill($("feed-pill"), feedLabel, feed.state === "serving" ? "ok" : feed.running ? "warn busy" : !feed.running && feed.exit_error ? "bad" : "");
+  $("feed-start").disabled = feed.running;
+  $("feed-stop").disabled = !feed.running;
+  const note = $("feed-note");
+  note.textContent = "";
+  if (feed.state === "serving") {
+    note.append("Agents connect at ");
+    const a = document.createElement("a");
+    a.href = s.feed_url + "/health"; a.target = "_blank"; a.rel = "noopener";
+    a.textContent = s.feed_url;
+    note.append(a, ". See docs/CONSUMING.md for the API.");
+  } else if (!feed.running && !s.database_exists) {
+    note.textContent = "There's no database yet. Start the ingestion first; it creates one.";
+  }
+  showError($("feed-error"), !feed.running && feed.exit_error);
+
+  const running = ing.running || feed.running;
+  for (const id of ["data_dir", "media_dir", "feed_addr", "save"]) $(id).disabled = running;
+  if (!settingsLoaded || (!editing && !running)) {
+    if (!settingsLoaded || document.activeElement.tagName !== "INPUT") {
+      $("data_dir").value = s.config.data_dir;
+      $("media_dir").value = s.config.media_dir;
+      $("feed_addr").value = s.config.feed_addr;
+      settingsLoaded = true;
+    }
+  }
+  $("data_hint").textContent = "Database: " + s.paths.database + (s.database_exists ? "" : " (not created yet)");
+  $("media_hint").textContent = s.paths.media_dir;
+
+  const svc = logTab === "ingestion" ? ing : feed;
+  const log = $("log");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  const text = (svc.log || []).join("\n") || "Nothing yet.";
+  if (log.textContent !== text) {
+    log.textContent = text;
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+}
+
+async function refresh() {
+  try { render(await api("api/status")); } catch (e) { setPill($("ing-pill"), "Dashboard unreachable", "bad"); }
+}
+
+async function control(service, action, button) {
+  button.disabled = true;
+  try { await api(`api/${service}/${action}`, { method: "POST" }); }
+  catch (e) { showError($(service === "ingestion" ? "ing-error" : "feed-error"), e.message); }
+  refresh();
+}
+
+$("ing-start").onclick = (e) => control("ingestion", "start", e.target);
+$("ing-stop").onclick = (e) => control("ingestion", "stop", e.target);
+$("feed-start").onclick = (e) => control("feed", "start", e.target);
+$("feed-stop").onclick = (e) => control("feed", "stop", e.target);
+
+for (const id of ["data_dir", "media_dir", "feed_addr"]) {
+  $(id).addEventListener("input", () => { editing = true; $("save-msg").textContent = ""; });
+}
+$("settings").onsubmit = async (e) => {
+  e.preventDefault();
+  showError($("save-error"), "");
+  try {
+    await api("api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_dir: $("data_dir").value, media_dir: $("media_dir").value, feed_addr: $("feed_addr").value }),
+    });
+    editing = false;
+    $("save-msg").innerHTML = '<span class="saved">Saved</span>';
+  } catch (err) { showError($("save-error"), err.message); }
+  refresh();
+};
+
+for (const name of ["ingestion", "feed"]) {
+  $("tab-" + name).onclick = () => {
+    logTab = name;
+    $("tab-ingestion").setAttribute("aria-selected", name === "ingestion");
+    $("tab-feed").setAttribute("aria-selected", name === "feed");
+    $("log").scrollTop = 1e9;
+    refresh();
+  };
+}
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
