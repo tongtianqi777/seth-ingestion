@@ -22,6 +22,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/tianqitong/seth-ingestion/db"
+	"github.com/tianqitong/seth-ingestion/internal/grouplist"
 )
 
 func main() {
@@ -45,7 +46,7 @@ func run(community, groupsFile, dataDir, mediaDir, logLevel string) error {
 	defer cancel()
 
 	log := waLog.Stdout("Main", logLevel, true)
-	groupNames, err := readGroupsFile(groupsFile)
+	groupNames, err := grouplist.ReadFile(groupsFile)
 	if err != nil {
 		return fmt.Errorf("read groups file: %w", err)
 	}

@@ -1,37 +1,12 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow/types"
 )
-
-func TestReadGroupsFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "groups.txt")
-	content := "# comment\n\nAnnouncements\n  Family   Connection  \nfamily connection\nCleanup Duties/Campus Security\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := readGroupsFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"Announcements", "Family   Connection", "Cleanup Duties/Campus Security"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("readGroupsFile = %q, want %q", got, want)
-	}
-
-	if err := os.WriteFile(path, []byte("# nothing yet\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readGroupsFile(path); err == nil {
-		t.Error("readGroupsFile accepted a file that lists no groups")
-	}
-}
 
 func groupJID(user string) types.JID { return types.NewJID(user, types.GroupServer) }
 
@@ -100,26 +75,5 @@ func TestSelectGroups(t *testing.T) {
 	twin := community("400", "Seth")
 	if _, err := selectGroups(append(known, twin), "Seth", wanted); err == nil || !strings.Contains(err.Error(), "several communities") {
 		t.Errorf("two communities named Seth: err = %v", err)
-	}
-}
-
-func TestMediaFolderName(t *testing.T) {
-	jid := groupJID("120363012345678901")
-	for name, want := range map[string]string{
-		"Preschool":                      "preschool",
-		"Cleanup Duties/Campus Security": "cleanup-duties-campus-security",
-		"Preschool P.E. Teachers":        "preschool-pe-teachers",
-		"Facilities & Outdoor":           "facilities-outdoor",
-		"Anything to do with High Tech":  "anything-to-do-with-high-tech",
-		"Parents' Corner":                "parents-corner",
-		"  --Spring 2026!--  ":           "spring-2026",
-		"🌱 Sprouts":                      "sprouts",
-		"Ñandú Club":                     "ñandú-club",
-		"种子 班":                           "种子-班",
-		"🌱 ✨":                            "120363012345678901",
-	} {
-		if got := mediaFolderName(name, jid); got != want {
-			t.Errorf("mediaFolderName(%q) = %q, want %q", name, got, want)
-		}
 	}
 }

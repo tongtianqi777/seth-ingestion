@@ -17,8 +17,11 @@ How seth-ingestion works inside, and how to change and test it. For setup and us
 | `db/schema.sql` | Table definitions, embedded into the binary and applied on startup |
 | `db/db.go` | SQLite access for the message store, plus upgrades from older schemas |
 | `*_test.go`, `db/db_test.go` | Tests. See [Building and checking](#building-and-checking) |
-| `run.sh` | Entry script: rebuilds when sources change, then runs `bin/seth-ingestion` |
+| `internal/grouplist/` | The groups-file format and the folder-name rule, shared by both programs |
+| `cmd/seth-sim/` | The simulator, which writes invented group traffic to `data-sim/` for testing clients. See [CONSUMING.md](CONSUMING.md#testing-with-simulated-data) |
+| `run.sh`, `sim.sh` | Entry scripts: rebuild when sources change, then run `bin/seth-ingestion` or `bin/seth-sim` |
 | `docs/` | These guides, and the logo in `docs/assets/` |
+| `data-sim/` | The simulator's database and media, ignored by git |
 | `data/` | Runtime state, ignored by git: `messages.db` (the recorded messages) and `whatsmeow-session.db` (the linked device's keys and session, managed by whatsmeow) |
 
 ## How it works
@@ -107,6 +110,12 @@ The tests don't need a WhatsApp connection:
 - `groups_test.go` covers reading `groups.txt`, picking the community and its groups (`selectGroups`) and folder names.
 - `ingest_test.go` runs the `Ingester` with a real `whatsmeow.Client` that never connects, backed by temporary session and message databases. It sends live messages, a history sync and a rename through `HandleEvent`, before and after `SetGroups`, and checks the rows: which groups are kept, sender names and phone numbers (including a LID and your own), and an album item whose download fails.
 - `db/db_test.go` covers albums, `SaveGroup` folders, `BackfillSender` and the legacy media migration.
+- `internal/grouplist` tests cover reading `groups.txt` and folder names.
+- `cmd/seth-sim` tests check that simulated data is consistent (albums complete, replies and edits point at real messages, files exist where `relative_path` says), that a seed repeats exactly, and that the simulator refuses to write to a real database.
+
+### The simulator
+
+`seth-sim` writes through `db.Store`, `SaveGroup` and `grouplist.FolderName`, the same code seth-ingestion uses, so a change to how rows are written reaches the simulated data too. When you add a message type or column to the ingester, add it to `emit` in `cmd/seth-sim/simulator.go` so clients can test with it. The invented people and message text are in `cmd/seth-sim/content.go`.
 
 Successful media downloads aren't tested, because they need WhatsApp's servers. `mediaRelPath` covers where the files go.
 
