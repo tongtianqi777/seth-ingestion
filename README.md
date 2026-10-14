@@ -142,6 +142,9 @@ new = db.execute("""
     WHERE m.rowid > ? ORDER BY m.rowid""", (last_seen,)).fetchall()
 ```
 
+> [!TIP]
+> No real messages needed to get started. `./sim.sh seed` fills `data-sim/` with a week of invented Seth group traffic, and `./sim.sh live` keeps adding to it, in exactly the same format. See [Testing with simulated data](docs/CONSUMING.md#testing-with-simulated-data).
+
 **[CONSUMING.md](docs/CONSUMING.md)** is the guide for building agents. It covers following new messages and files, reading conversations with edits and replies, finding media files, what the data guarantees, and a complete working example.
 
 ## Configuration
@@ -192,7 +195,7 @@ Newer WhatsApp groups can identify people by a hidden ID instead of their phone 
 
 | Guide | Read it to… |
 |---|---|
-| [CONSUMING.md](docs/CONSUMING.md) | build an AI agent or other program that reads the data |
+| [CONSUMING.md](docs/CONSUMING.md) | build an AI agent or other program that reads the data, and test it with simulated messages |
 | [DATABASE.md](docs/DATABASE.md) | look up a table or column, or see how albums, edits and upgrades work |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | understand how the program works, change it, and test it |
 

@@ -6,7 +6,7 @@ seth-ingestion collects the Seth community's WhatsApp messages so that other pro
 
 For what each column means, see [DATABASE.md](DATABASE.md). For how the data is collected, see the [README](../README.md).
 
-**On this page:** [At a glance](#at-a-glance) · [Connecting](#connecting) · [Following new messages](#following-new-messages) · [Reading a conversation](#reading-a-conversation) · [Media files](#media-files) · [What you can rely on](#what-you-can-rely-on) · [A complete example](#a-complete-example)
+**On this page:** [At a glance](#at-a-glance) · [Connecting](#connecting) · [Following new messages](#following-new-messages) · [Reading a conversation](#reading-a-conversation) · [Media files](#media-files) · [What you can rely on](#what-you-can-rely-on) · [Testing with simulated data](#testing-with-simulated-data) · [A complete example](#a-complete-example)
 
 ## At a glance
 
@@ -159,6 +159,70 @@ These hold for every version, and changes to them will be called out:
 
 > [!CAUTION]
 > These are a school community's private conversations, with parents' names and phone numbers and photos of children. Give agents only the access they need, keep the data on machines you control, and don't send it to services the school hasn't agreed to.
+
+## Testing with simulated data
+
+You don't need real WhatsApp messages to build or test an agent. `seth-sim` writes invented Seth group traffic into its own database and media folder, `data-sim/`, through the same code that writes the real database. The tables, the row shapes and the way rows appear (albums arriving photo by photo, edits, failed downloads) are all the same.
+
+```bash
+./sim.sh seed      # a week of history across all the listed groups
+./sim.sh live      # a new message every few seconds, until Ctrl+C
+./sim.sh send -group Preschool -from "Melissa Chen" -text "Pickup moved to 3:30 today"
+```
+
+Then point your agent at `data-sim/messages.db` and `data-sim/media` instead of the real paths. Run `./sim.sh live` in one terminal and your agent in another to watch it follow messages as they arrive.
+
+| Command | What it does | Useful flags |
+|---|---|---|
+| `seed` | Adds history, `source = 'history'`, spread over school hours | `-days` (7), `-per-day` (25) |
+| `live` | Adds messages as they "arrive", `source = 'live'` | `-interval` (5s), `-count` (0 = until Ctrl+C) |
+| `send` | Adds one message you describe | `-group`, `-from`, `-text`, `-kind`, `-target` |
+
+All commands also take `-db`, `-media-dir`, `-groups-file` and `-seed`. Run `./sim.sh <command> -h` for details.
+
+**What you get.** Texts, replies, edits, photos, albums of 2 to 4 photos, PDF documents, voice notes, reactions (`other` rows) and downloads that failed, in every group in `groups.txt`. Announcements come from staff only. Some senders have no phone number, as happens in real groups. `send -kind` picks one of `text`, `reply`, `edit`, `image`, `album`, `document`, `voice`, `reaction` or `failed`; `-target` chooses the message a reply, edit or reaction points at.
+
+### School events, for calendar agents
+
+Announcements make up about one message in eight, and most of them are about school events, the way a school office writes them:
+
+- **New events:** "📅 The fall family picnic is on Sat, Oct 24 at 11am. Bring a dish to share!"
+- **Reminders** for the next few days: "Reminder: school picture day is tomorrow."
+- **Deadlines:** "Permission slips for the field trip to the pumpkin patch on 10/27 are due by Friday, October 23."
+- **Reschedules:** "Update: chapel with a guest speaker has been moved from Oct 21 to Nov 4 at 9am."
+- **Cancellations:** "The bake sale fundraiser on Friday, October 23 is cancelled because of low sign-ups."
+- **Corrections** by editing an earlier post: an `edit` row saying "Correction: parent-teacher conferences are now Fri, Oct 30 to 10/31."
+- **Multi-day events,** such as the book fair or Thanksgiving break.
+
+Dates are written in mixed formats, relative to when the message was sent: "tomorrow", "this Friday", "Monday, October 19", "Mon, Oct 19", "10/19", "Oct 19" and "Monday 10/19/2026". Times are written as "11am", "6:30pm" or "6:30 PM". Seasonal events stay in season: the pumpkin patch is in October, the Christmas program in December, and Thanksgiving break in Thanksgiving week.
+
+**Checking your agent's answers.** Each event post also has a row in `simulated_events`, which exists only in simulated databases. It records what the post really means, so a test can compare what your agent extracted with what was announced:
+
+| Column | Meaning |
+|---|---|
+| `chat_jid`, `message_id` | The post (or edit) that announced it |
+| `event` | Which event, e.g. `fall family picnic` |
+| `action` | `scheduled`, `reminder`, `deadline`, `rescheduled` or `cancelled` |
+| `starts_at` | When it starts, in the school's local time: `2026-10-24T11:00:00-07:00`, or a date like `2026-10-24` for an all-day event |
+| `ends_on` | The last day of a multi-day event |
+| `all_day` | `1` for an all-day event |
+| `previous_starts_at` | For `rescheduled`: the date it moved from |
+| `deadline_on` | For `deadline`: the day the permission slips are due |
+
+```sql
+SELECT m.sent_at, m.body, e.action, e.starts_at, e.previous_starts_at, e.deadline_on
+FROM simulated_events e
+JOIN messages m USING (chat_jid, message_id)
+ORDER BY m.rowid;
+```
+
+**Things to know**
+
+- **It's all invented.** People, phone numbers (in the 555-01xx range, which is reserved for fiction), group IDs and messages are made up. The group IDs differ from the real ones, so don't hard-code them.
+- **Repeatable.** The same `-seed` gives the same messages, which helps when a test needs fixed data.
+- **Photos and PDFs are real files.** Voice notes are not: each is a short text placeholder with an audio file name, so code that decodes audio will fail on them.
+- **Telling it apart.** A simulated database has an extra `simulation` table, which a real one never has. seth-sim refuses to write to a database that sits next to a WhatsApp session or holds messages it didn't make, so it can't touch the real data.
+- **Starting over.** Each run adds to what's there. To start fresh, delete `data-sim/`.
 
 ## A complete example
 

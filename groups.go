@@ -1,57 +1,22 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"unicode"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/tianqitong/seth-ingestion/db"
+	"github.com/tianqitong/seth-ingestion/internal/grouplist"
 )
 
 // announcementsName is how WhatsApp shows a community's announcement group,
 // whatever the group's own name is. Use it in the groups file to monitor it.
 const announcementsName = "Announcements"
-
-// readGroupsFile returns the group names listed in path: one per line, with
-// blank lines and lines starting with # ignored.
-func readGroupsFile(path string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var names []string
-	seen := map[string]bool{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") || seen[nameKey(line)] {
-			continue
-		}
-		seen[nameKey(line)] = true
-		names = append(names, line)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	if len(names) == 0 {
-		return nil, fmt.Errorf("%s lists no groups", path)
-	}
-	return names, nil
-}
-
-// nameKey normalizes a group name for matching: case and runs of whitespace don't matter.
-func nameKey(name string) string {
-	return strings.ToLower(strings.Join(strings.Fields(name), " "))
-}
 
 // selectedGroup is a group of the community that the groups file lists.
 type selectedGroup struct {
@@ -88,7 +53,7 @@ func selectGroups(known []*types.GroupInfo, community string, wanted []string) (
 				continue
 			}
 			names = append(names, g.Name)
-			if nameKey(g.Name) == nameKey(community) {
+			if grouplist.Key(g.Name) == grouplist.Key(community) {
 				matches = append(matches, g)
 			}
 		}
@@ -116,11 +81,11 @@ func selectGroups(known []*types.GroupInfo, community string, wanted []string) (
 		if sg.IsAnnouncement {
 			sg.Name = announcementsName
 		}
-		byName[nameKey(sg.Name)] = append(byName[nameKey(sg.Name)], sg)
+		byName[grouplist.Key(sg.Name)] = append(byName[grouplist.Key(sg.Name)], sg)
 	}
 	matched := map[string]bool{}
 	for _, name := range wanted {
-		key := nameKey(name)
+		key := grouplist.Key(name)
 		if matched[key] {
 			continue
 		}
@@ -202,7 +167,7 @@ func findGroups(ctx context.Context, client *whatsmeow.Client, store *db.Store, 
 			CommunityJID:   sel.CommunityJID.String(),
 			CommunityName:  sel.CommunityName,
 			IsAnnouncement: sg.IsAnnouncement,
-			MediaFolder:    mediaFolderName(sg.Name, sg.JID),
+			MediaFolder:    grouplist.FolderName(sg.Name, sg.JID.User),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("record group %q: %w", sg.Name, err)
@@ -210,30 +175,4 @@ func findGroups(ctx context.Context, client *whatsmeow.Client, store *db.Store, 
 		groups[sg.JID] = &g
 	}
 	return groups, nil
-}
-
-// mediaFolderName turns a group name into a lowercase folder name of letters,
-// digits and dashes, such as "cleanup-duties-campus-security". Dots and
-// apostrophes are dropped ("P.E." becomes "pe"), and every other run of
-// characters that aren't letters or digits becomes one dash.
-func mediaFolderName(name string, jid types.JID) string {
-	var b strings.Builder
-	dash := false
-	for _, r := range strings.ToLower(name) {
-		switch {
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			if dash && b.Len() > 0 {
-				b.WriteByte('-')
-			}
-			dash = false
-			b.WriteRune(r)
-		case r == '.' || r == '\'' || r == '’':
-		default:
-			dash = true
-		}
-	}
-	if b.Len() == 0 {
-		return jid.User
-	}
-	return b.String()
 }
