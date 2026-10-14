@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -260,4 +262,24 @@ func keys[V any](m map[string]V) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+func TestStatusLine(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	statusLine("qr", "2@not-shown")
+	statusLines = true
+	statusLine("qr", "2@code")
+	statusLine("status", "recording", "17")
+	statusLines = false
+	os.Stdout = stdout
+	w.Close()
+	out, _ := io.ReadAll(r)
+	if string(out) != "@seth qr 2@code\n@seth status recording 17\n" {
+		t.Errorf("status lines = %q", out)
+	}
 }

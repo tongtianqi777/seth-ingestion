@@ -21,6 +21,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#the-dashboard">Dashboard</a> ·
   <a href="#choosing-the-groups">Groups</a> ·
   <a href="#what-gets-recorded">What's recorded</a> ·
   <a href="#for-ai-agents">For AI agents</a> ·
@@ -63,6 +64,10 @@ Everything stays on the machine running the program: a single SQLite file in `da
 
 **Run it**
 
+The easiest way is the [dashboard](#the-dashboard): run `./dashboard.sh`, and link WhatsApp and start everything from your browser.
+
+To run it from a terminal instead:
+
 ```bash
 ./run.sh
 ```
@@ -77,6 +82,55 @@ Later runs reuse the saved session, so there's nothing to scan. Press **Ctrl+C**
 
 > [!NOTE]
 > Right after you link the device, WhatsApp also sends some recent history. Messages from the listed groups found there are recorded too, with `source = 'history'`. Messages that arrive while the program runs are `'live'`.
+
+## The dashboard
+
+A control panel for this Mac, in your browser. From one page you can link WhatsApp by scanning the QR code, start and stop the ingestion and the data feed, and choose where the data lives.
+
+```bash
+./dashboard.sh
+```
+
+It builds itself the first time, then opens <http://127.0.0.1:8090>. Press **Ctrl+C** in the terminal to close it; that also stops both services.
+
+<p align="center">
+  <img src="docs/assets/dashboard.png" alt="The Seth Dashboard, showing the WhatsApp QR code to scan, the data feed, and the settings" width="720">
+</p>
+
+**Link WhatsApp and start recording**
+
+1. Press **Start** under **WhatsApp ingestion**. The first time, a QR code appears on the page.
+2. On your phone, open **WhatsApp → Settings → Linked Devices → Link a Device**, and scan it. The code refreshes every 20 seconds or so. If it expires, press **Start** again.
+3. The status changes to **Linked**, then **Connected**, then **Recording 17 groups**.
+
+Once the device is linked, later starts connect straight away, with no QR code.
+
+**Serve the data to agents**
+
+Press **Start** under **Data feed**. When it says **Serving**, agents can connect at the address shown, by default <http://127.0.0.1:8080>. The two services are independent: the feed can run while the ingestion is stopped, and serves whatever has been recorded.
+
+**Settings**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Data folder | `data` | Holds the message database (`messages.db`) and the linked WhatsApp session |
+| Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` | Where photos and other files are saved, in a folder per group |
+| Feed address | `127.0.0.1:8080` | Where the data feed listens. `0.0.0.0:8080` opens it to your network, with no login |
+
+### At a glance
+
+Below the controls, the **At a glance** panel shows how the ingestion is doing: messages and media files saved, failed downloads, the newest message, and a per-group breakdown. It reads the database directly (read-only), so it works even when everything is stopped.
+
+It also shows **storage**: how much disk the ingestion takes (the media folder plus the database and WhatsApp session) and how much space is left on this Mac, with a warning when free space runs low. Media piles up over time, so keep an eye on it. Sizes come from the files on disk and refresh every 30 seconds.
+
+<p align="center">
+  <img src="docs/assets/dashboard-metrics.png" alt="The At a glance panel with message and media numbers and a per-group table" width="720">
+</p>
+
+Both services always use the same folders, so the feed serves exactly what the ingestion records. The settings can only be changed while both are stopped. Relative paths are relative to this repo, and the page shows the full path for each. The settings are saved in `dashboard.json`.
+
+> [!NOTE]
+> The dashboard only answers requests from this Mac, and other websites can't press its buttons. It runs `run.sh` and `feed.sh` for you, so everything else in this README still applies. The **Output** panel shows what each one prints.
 
 ## Choosing the groups
 
@@ -209,7 +263,7 @@ Newer WhatsApp groups can identify people by a hidden ID instead of their phone 
 |---|---|
 | [CONSUMING.md](docs/CONSUMING.md) | build an AI agent or other program that reads the data, over the HTTP API or from SQLite, and test it with simulated messages |
 | [DATABASE.md](docs/DATABASE.md) | look up a table or column, or see how albums, edits and upgrades work |
-| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | understand how the program works, change it, and test it |
+| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | understand how the programs work (ingestion, feed, simulator, dashboard), change them, and test them |
 
 ---
 
