@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -211,22 +212,28 @@ func findGroups(ctx context.Context, client *whatsmeow.Client, store *db.Store, 
 	return groups, nil
 }
 
-// mediaFolderName turns a group name into a folder name that works on macOS,
-// Linux and Windows: path separators and other reserved characters become "-".
+// mediaFolderName turns a group name into a lowercase folder name of letters,
+// digits and dashes, such as "cleanup-duties-campus-security". Dots and
+// apostrophes are dropped ("P.E." becomes "pe"), and every other run of
+// characters that aren't letters or digits becomes one dash.
 func mediaFolderName(name string, jid types.JID) string {
-	folder := strings.Map(func(r rune) rune {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(name) {
 		switch {
-		case r < 0x20 || r == 0x7f:
-			return ' '
-		case strings.ContainsRune(`/\:*?"<>|`, r):
-			return '-'
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			if dash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			dash = false
+			b.WriteRune(r)
+		case r == '.' || r == '\'' || r == '’':
+		default:
+			dash = true
 		}
-		return r
-	}, name)
-	// A leading dot would hide the folder, and Windows drops trailing dots and spaces.
-	folder = strings.Trim(strings.Join(strings.Fields(folder), " "), ". ")
-	if folder == "" {
+	}
+	if b.Len() == 0 {
 		return jid.User
 	}
-	return folder
+	return b.String()
 }

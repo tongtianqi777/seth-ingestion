@@ -238,6 +238,7 @@ func (in *Ingester) senderLabel(ctx context.Context, info types.MessageInfo, pho
 	}
 	names := []string{contact.FullName, contact.FirstName, info.PushName, contact.PushName, contact.BusinessName}
 	if info.IsFromMe {
+		// Your own display name isn't in the contact store; the session has it.
 		names = append(names, in.client.Store.PushName)
 	}
 	for _, name := range names {
@@ -270,7 +271,6 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		SenderJID:   info.Sender.ToNonAD().String(),
 		SenderPhone: phone,
 		SenderName:  info.PushName,
-		IsFromMe:    info.IsFromMe,
 		IsGroup:     true,
 		SentAt:      info.Timestamp,
 		Source:      source,

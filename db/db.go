@@ -23,7 +23,6 @@ type Message struct {
 	SenderJID    string
 	SenderPhone  string
 	SenderName   string
-	IsFromMe     bool
 	IsGroup      bool
 	SentAt       time.Time
 	MessageType  string
@@ -80,7 +79,6 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	added := map[string]string{
 		"sender":           `ALTER TABLE messages ADD COLUMN sender TEXT NOT NULL DEFAULT ''`,
 		"media_file_count": `ALTER TABLE messages ADD COLUMN media_file_count INTEGER NOT NULL DEFAULT 0`,
-		"is_from_me":       `ALTER TABLE messages ADD COLUMN is_from_me INTEGER NOT NULL DEFAULT 0`,
 	}
 	for col, stmt := range added {
 		if !cols[col] {
@@ -220,7 +218,7 @@ type Group struct {
 
 // SaveGroup records g in chat_groups and returns it as stored.
 //
-// A new group gets g.MediaFolder, or "<folder> (2)", "<folder> (3)", … if a
+// A new group gets g.MediaFolder, or "<folder>-2", "<folder>-3", … if a
 // folder with that name (ignoring case) already belongs to another group. An
 // existing group keeps its folder, so a renamed group's files stay together;
 // only its name and community are updated.
@@ -264,7 +262,7 @@ func freeFolder(ctx context.Context, tx *sql.Tx, want string) (string, error) {
 	for i := 1; i <= 1000; i++ {
 		folder := want
 		if i > 1 {
-			folder = fmt.Sprintf("%s (%d)", want, i)
+			folder = fmt.Sprintf("%s-%d", want, i)
 		}
 		var taken bool
 		if err := tx.QueryRowContext(ctx,
@@ -313,11 +311,11 @@ func (s *Store) Save(ctx context.Context, m *Message, atts []MediaFile) (bool, e
 	sentAt := m.SentAt.UTC().Format(time.RFC3339)
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (
-			chat_jid, message_id, sender, sender_jid, sender_phone, sender_name, is_from_me, is_group,
+			chat_jid, message_id, sender, sender_jid, sender_phone, sender_name, is_group,
 			sent_at, ingested_at, message_type, body, edit_target_id, quoted_id, source, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (chat_jid, message_id) DO NOTHING`,
-		m.ChatJID, m.MessageID, m.Sender, m.SenderJID, nullable(m.SenderPhone), nullable(m.SenderName), m.IsFromMe, m.IsGroup,
+		m.ChatJID, m.MessageID, m.Sender, m.SenderJID, nullable(m.SenderPhone), nullable(m.SenderName), m.IsGroup,
 		sentAt, now, m.MessageType, nullable(m.Body), nullable(m.EditTargetID), nullable(m.QuotedID),
 		m.Source, nullable(m.RawJSON),
 	)

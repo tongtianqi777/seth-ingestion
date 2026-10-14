@@ -12,11 +12,11 @@ CREATE TABLE IF NOT EXISTS messages (
 
     -- Sender
     sender          TEXT    NOT NULL DEFAULT '',   -- the sender as WhatsApp labels them: your saved contact name,
-                                                   -- else their own display name, else their phone number
+                                                   -- else their own display name, else their phone number.
+                                                   -- Your own messages are recorded the same way as everyone else's
     sender_jid      TEXT    NOT NULL,              -- may be a phone JID (@s.whatsapp.net) or a LID (@lid)
     sender_phone    TEXT,                          -- resolved E.164 digits, e.g. 14125778174
     sender_name     TEXT,                          -- the sender's own WhatsApp display name at the time of the message
-    is_from_me      INTEGER NOT NULL DEFAULT 0,    -- 1 if you sent the message
     is_group        INTEGER NOT NULL DEFAULT 0,    -- 1 for group messages; 0 on rows from the earlier single-contact version
 
     -- Timing
@@ -51,8 +51,9 @@ CREATE TABLE IF NOT EXISTS chat_groups (
     community_name  TEXT,                          -- e.g. Seth
     is_announcement INTEGER NOT NULL DEFAULT 0,    -- 1 for the community's announcement group
     media_folder    TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-                                                   -- folder in the media dir for this group's files. Set from the name
-                                                   -- when the group is first recorded and never changed after
+                                                   -- folder in the media dir for this group's files, e.g.
+                                                   -- cleanup-duties-campus-security. Made from the name when the
+                                                   -- group is first recorded and never changed after
     first_seen_at   TEXT    NOT NULL,              -- RFC3339 UTC
     updated_at      TEXT    NOT NULL               -- RFC3339 UTC, when name or community was last written
 );
@@ -71,7 +72,7 @@ CREATE TABLE IF NOT EXISTS message_media_files (
     caption           TEXT,                        -- this file's caption, if any
     file_name         TEXT,                        -- original file name (documents only)
     relative_path     TEXT,                        -- saved file, relative to the media dir, '/'-separated,
-                                                   -- e.g. Preschool/20261012T053508Z_3A37298F72373DFA1114.jpg
+                                                   -- e.g. preschool/20261012T053508Z_3A37298F72373DFA1114.jpg
     mime              TEXT,
     size              INTEGER,                     -- bytes
     sha256            TEXT,                        -- hex sha256 of the saved file

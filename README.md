@@ -3,7 +3,7 @@
 Links to your WhatsApp account as a device and records the messages and media files in the groups of the **Seth** community that are listed in [`groups.txt`](groups.txt):
 
 - **Messages** go to a local SQLite database: `./data/messages.db`. Each one is recorded with the group it was sent in.
-- **Images and other media** (videos, voice notes, documents, stickers) go to `/Users/tnpbot/Downloads/whatsapp-poc-images`, in a folder per group, such as `Preschool/`.
+- **Images and other media** (videos, voice notes, documents, stickers) go to `/Users/tnpbot/Downloads/whatsapp-poc-images`, in a folder per group, such as `preschool/`.
 
 It's built on [whatsmeow](https://github.com/tulir/whatsmeow) and written in Go.
 
@@ -43,7 +43,7 @@ Only groups that are both listed and part of the Seth community are recorded. Me
 
 ## What gets captured
 
-The program records every message in the listed groups, including your own (`is_from_me = 1`). There are three tables:
+The program records every message in the listed groups. Your own messages are recorded the same way as everyone else's. There are three tables:
 
 - **`chat_groups`** has one row per recorded group: its name, its community, and its folder in the media folder.
 - **`messages`** has exactly one row per message. `chat_jid` is the group's ID, which joins to `chat_groups.group_jid`. `sender` names the sender as WhatsApp would: your saved contact name for them, otherwise the name they set for themselves, otherwise their phone number.
@@ -57,7 +57,7 @@ The program records every message in the listed groups, including your own (`is_
 | Edit to an earlier message | an `edit` row with the new text, and `edit_target_id` pointing to the original | none |
 | Anything else (reactions, locations, polls…) | an `other` row. The full content is kept in `raw_json` | none |
 
-Each group's files are in its own folder within the media folder, named `<UTC time>_<message id>.<ext>`. The folder is named after the group when it's first recorded, for example `Preschool/` or `Cleanup Duties-Campus Security/` (a `/` in a name becomes `-`). It keeps that name if the group is renamed later. `chat_groups.media_folder` records each group's folder, and `messages.media_file_count` gives the number of files for each message.
+Each group's files are in its own folder within the media folder, named `<UTC time>_<message id>.<ext>`. The folder name is the group's name in lowercase, with dashes instead of spaces and punctuation, for example `preschool/`, `cleanup-duties-campus-security/` or `preschool-pe-teachers/`. It's set when the group is first recorded, and kept if the group is renamed later. `chat_groups.media_folder` records each group's folder, and `messages.media_file_count` gives the number of files for each message.
 
 Notices such as "… joined from the community" aren't recorded.
 

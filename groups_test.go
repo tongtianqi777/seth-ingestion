@@ -106,15 +106,17 @@ func TestSelectGroups(t *testing.T) {
 func TestMediaFolderName(t *testing.T) {
 	jid := groupJID("120363012345678901")
 	for name, want := range map[string]string{
-		"Preschool":                      "Preschool",
-		"Cleanup Duties/Campus Security": "Cleanup Duties-Campus Security",
-		"Preschool P.E. Teachers":        "Preschool P.E. Teachers",
-		"Facilities & Outdoor":           "Facilities & Outdoor",
-		`a\b:c*d?e"f<g>h|i`:              "a-b-c-d-e-f-g-h-i",
-		"  ..Hidden?  ":                  "Hidden-",
-		"Tabs\tand\nnewlines":            "Tabs and newlines",
-		"..":                             "120363012345678901",
-		"🌱 Sprouts":                      "🌱 Sprouts",
+		"Preschool":                      "preschool",
+		"Cleanup Duties/Campus Security": "cleanup-duties-campus-security",
+		"Preschool P.E. Teachers":        "preschool-pe-teachers",
+		"Facilities & Outdoor":           "facilities-outdoor",
+		"Anything to do with High Tech":  "anything-to-do-with-high-tech",
+		"Parents' Corner":                "parents-corner",
+		"  --Spring 2026!--  ":           "spring-2026",
+		"🌱 Sprouts":                      "sprouts",
+		"Ñandú Club":                     "ñandú-club",
+		"种子 班":                           "种子-班",
+		"🌱 ✨":                            "120363012345678901",
 	} {
 		if got := mediaFolderName(name, jid); got != want {
 			t.Errorf("mediaFolderName(%q) = %q, want %q", name, got, want)

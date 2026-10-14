@@ -62,7 +62,7 @@ Groups are matched by name only at startup. A rename while running arrives as `e
 
 ### Media folders
 
-Each group's files go in their own folder of the media dir. `mediaFolderName` makes the folder name from the group name, replacing `/ \ : * ? " < > |` and control characters, and trimming leading and trailing dots and spaces. `Store.SaveGroup` uses that name for a group it hasn't seen, adding ` (2)`, ` (3)`, … if another group already has the folder. `chat_groups.media_folder` compares without case, because the macOS file system does. An existing group keeps its folder, so renaming a group doesn't split its files. `mediaRelPath` builds `<folder>/<UTC time>_<message id><ext>`, which is what `message_media_files.relative_path` stores.
+Each group's files go in their own folder of the media dir. `mediaFolderName` makes the folder name from the group name: lowercase letters and digits, with one dash for each run of other characters, and dots and apostrophes dropped (`Preschool P.E. Teachers` → `preschool-pe-teachers`). Unicode letters are kept, and a name with no letters or digits gets the group JID's user part. `Store.SaveGroup` uses that name for a group it hasn't seen, adding `-2`, `-3`, … if another group already has the folder. `chat_groups.media_folder` compares without case, because the macOS file system does. An existing group keeps its folder, so renaming a group doesn't split its files. `mediaRelPath` builds `<folder>/<UTC time>_<message id><ext>`, which is what `message_media_files.relative_path` stores.
 
 ### Senders (phone numbers vs LIDs)
 
@@ -70,7 +70,7 @@ WhatsApp is moving users from phone-number JIDs (`14125778174@s.whatsapp.net`) t
 
 `sender_jid` stores whatever WhatsApp sent, which may be a LID. `sender_phone` stores the resolved phone number, if any.
 
-`senderLabel` fills `sender` the way WhatsApp labels people in a group: your saved contact name (`FullName`, then `FirstName`, from whatsmeow's contact store, which is synced from your phone), otherwise their own display name (`PushName`), otherwise `+<phone>`. For your own messages it falls back to your own display name. `sender_name` keeps the display name alone; see [DATABASE.md](DATABASE.md#messages).
+`senderLabel` fills `sender` the way WhatsApp labels people in a group: your saved contact name (`FullName`, then `FirstName`, from whatsmeow's contact store, which is synced from your phone), otherwise their own display name (`PushName`), otherwise `+<phone>`. Your own messages go through the same steps; the only difference is that your own display name comes from the session (`Store.PushName`), because the contact store doesn't hold it. `sender_name` keeps the display name alone; see [DATABASE.md](DATABASE.md#messages).
 
 ### Groups only
 
@@ -99,7 +99,7 @@ gofmt -l .                          # should print nothing
 The tests don't need a WhatsApp connection:
 
 - `groups_test.go` covers reading `groups.txt`, picking the community and its groups (`selectGroups`) and folder names.
-- `ingest_test.go` runs the `Ingester` with a real `whatsmeow.Client` that never connects, backed by temporary session and message databases. It sends live messages, a history sync and a rename through `HandleEvent`, before and after `SetGroups`, and checks the rows: which groups are kept, sender names and phone numbers (including a LID), your own messages, and an album item whose download fails.
+- `ingest_test.go` runs the `Ingester` with a real `whatsmeow.Client` that never connects, backed by temporary session and message databases. It sends live messages, a history sync and a rename through `HandleEvent`, before and after `SetGroups`, and checks the rows: which groups are kept, sender names and phone numbers (including a LID and your own), and an album item whose download fails.
 - `db/db_test.go` covers albums, `SaveGroup` folders, `BackfillSender` and the legacy media migration.
 
 Successful media downloads aren't tested, because they need WhatsApp's servers. `mediaRelPath` covers where the files go.

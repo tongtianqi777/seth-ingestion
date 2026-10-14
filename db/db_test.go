@@ -122,7 +122,7 @@ func TestMigrateLegacyMedia(t *testing.T) {
 			t.Errorf("column %s not dropped", c)
 		}
 	}
-	for _, c := range []string{"media_file_count", "is_from_me"} {
+	for _, c := range []string{"media_file_count"} {
 		if !cols[c] {
 			t.Errorf("column %s not added", c)
 		}
@@ -162,18 +162,18 @@ func TestSaveGroup(t *testing.T) {
 		return saved
 	}
 
-	acorn := save(Group{JID: "1@g.us", Name: "Acorn", CommunityJID: "100@g.us", CommunityName: "Seth", MediaFolder: "Acorn"})
-	if acorn.MediaFolder != "Acorn" {
-		t.Errorf("new group's folder = %q, want Acorn", acorn.MediaFolder)
+	acorn := save(Group{JID: "1@g.us", Name: "Acorn", CommunityJID: "100@g.us", CommunityName: "Seth", MediaFolder: "acorn"})
+	if acorn.MediaFolder != "acorn" {
+		t.Errorf("new group's folder = %q, want acorn", acorn.MediaFolder)
 	}
-	// A different group whose folder name differs only in case gets its own folder,
-	// as the two would be the same folder on macOS.
-	if other := save(Group{JID: "2@g.us", Name: "acorn", MediaFolder: "acorn"}); other.MediaFolder != "acorn (2)" {
-		t.Errorf("second group's folder = %q, want %q", other.MediaFolder, "acorn (2)")
+	// A different group that would get the same folder (here, ignoring case, as
+	// macOS does) gets its own numbered one.
+	if other := save(Group{JID: "2@g.us", Name: "ACORN", MediaFolder: "ACORN"}); other.MediaFolder != "ACORN-2" {
+		t.Errorf("second group's folder = %q, want ACORN-2", other.MediaFolder)
 	}
 	// Saving an existing group (for example after a rename) updates its name but keeps its folder.
-	if again := save(Group{JID: "1@g.us", Name: "Acorn Class", CommunityJID: "100@g.us", CommunityName: "Seth", MediaFolder: "Acorn Class"}); again.MediaFolder != "Acorn" {
-		t.Errorf("existing group's folder = %q, want Acorn", again.MediaFolder)
+	if again := save(Group{JID: "1@g.us", Name: "Acorn Class", CommunityJID: "100@g.us", CommunityName: "Seth", MediaFolder: "acorn-class"}); again.MediaFolder != "acorn" {
+		t.Errorf("existing group's folder = %q, want acorn", again.MediaFolder)
 	}
 	if err := s.RenameGroup(ctx, "2@g.us", "Acorn Parents"); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestSaveGroup(t *testing.T) {
 		}
 		got = append(got, jid+"|"+name+"|"+community+"|"+folder)
 	}
-	want := []string{"1@g.us|Acorn Class|Seth|Acorn", "2@g.us|Acorn Parents||acorn (2)"}
+	want := []string{"1@g.us|Acorn Class|Seth|acorn", "2@g.us|Acorn Parents||ACORN-2"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("chat_groups = %q, want %q", got, want)
 	}

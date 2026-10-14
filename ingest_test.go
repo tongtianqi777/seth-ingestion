@@ -128,8 +128,8 @@ func TestIngestMonitoredGroups(t *testing.T) {
 
 	groups := map[types.JID]*db.Group{}
 	for _, g := range []db.Group{
-		{JID: preschool.String(), Name: "Preschool", MediaFolder: "Preschool"},
-		{JID: announce.String(), Name: "Announcements", IsAnnouncement: true, MediaFolder: "Announcements"},
+		{JID: preschool.String(), Name: "Preschool", MediaFolder: "preschool"},
+		{JID: announce.String(), Name: "Announcements", IsAnnouncement: true, MediaFolder: "announcements"},
 	} {
 		saved, err := store.SaveGroup(testContext, g)
 		if err != nil {
@@ -158,11 +158,11 @@ func TestIngestMonitoredGroups(t *testing.T) {
 
 	type row struct {
 		chat, sender, senderPhone, msgType, body string
-		fromMe, isGroup, files                   int
+		isGroup, files                           int
 	}
 	rows, err := check.Query(`
 		SELECT message_id, chat_jid, sender, COALESCE(sender_phone, ''), message_type, COALESCE(body, ''),
-		       is_from_me, is_group, media_file_count
+		       is_group, media_file_count
 		FROM messages`)
 	if err != nil {
 		t.Fatal(err)
@@ -171,17 +171,17 @@ func TestIngestMonitoredGroups(t *testing.T) {
 	for rows.Next() {
 		var id string
 		var r row
-		if err := rows.Scan(&id, &r.chat, &r.sender, &r.senderPhone, &r.msgType, &r.body, &r.fromMe, &r.isGroup, &r.files); err != nil {
+		if err := rows.Scan(&id, &r.chat, &r.sender, &r.senderPhone, &r.msgType, &r.body, &r.isGroup, &r.files); err != nil {
 			t.Fatal(err)
 		}
 		got[id] = r
 	}
 	rows.Close()
 	want := map[string]row{
-		"LIVE1":  {preschool.String(), "Melissa Contact", "15550000002", "text", "Pickup is at 3 today", 0, 1, 0},
-		"HIST1":  {preschool.String(), "Liwen Lin", "15550000003", "text", "I was going to do it today", 0, 1, 0},
-		"HIST2":  {preschool.String(), "Tianqi", "15550000001", "text", "I will take your spot", 1, 1, 0},
-		"ALBUM1": {announce.String(), "Melissa Contact", "15550000002", "album", "Field trip", 0, 1, 1},
+		"LIVE1":  {preschool.String(), "Melissa Contact", "15550000002", "text", "Pickup is at 3 today", 1, 0},
+		"HIST1":  {preschool.String(), "Liwen Lin", "15550000003", "text", "I was going to do it today", 1, 0},
+		"HIST2":  {preschool.String(), "Tianqi", "15550000001", "text", "I will take your spot", 1, 0}, // your own message
+		"ALBUM1": {announce.String(), "Melissa Contact", "15550000002", "album", "Field trip", 1, 1},
 	}
 	if len(got) != len(want) {
 		t.Errorf("stored messages %v, want only %v", keys(got), keys(want))
@@ -215,7 +215,7 @@ func TestIngestMonitoredGroups(t *testing.T) {
 		names[jid] = name + " | " + folder
 	}
 	rows.Close()
-	if names[preschool.String()] != "Preschool 2026 | Preschool" || names[announce.String()] != "Announcements | Announcements" {
+	if names[preschool.String()] != "Preschool 2026 | preschool" || names[announce.String()] != "Announcements | announcements" {
 		t.Errorf("chat_groups = %v; want Preschool renamed with its folder kept, and Announcements unchanged", names)
 	}
 }
@@ -244,8 +244,8 @@ func TestMediaRelPath(t *testing.T) {
 		md     media
 		want   string
 	}{
-		{"Preschool", media{mime: "image/jpeg"}, "Preschool/20261012T123508Z_3A37298F72373DFA1114.jpg"},
-		{"Spiritual Matters", media{mime: "application/pdf", fileName: "Code of Conduct.PDF"}, "Spiritual Matters/20261012T123508Z_3A37298F72373DFA1114.pdf"},
+		{"preschool", media{mime: "image/jpeg"}, "preschool/20261012T123508Z_3A37298F72373DFA1114.jpg"},
+		{"spiritual-matters", media{mime: "application/pdf", fileName: "Code of Conduct.PDF"}, "spiritual-matters/20261012T123508Z_3A37298F72373DFA1114.pdf"},
 		{"", media{mime: "audio/ogg; codecs=opus"}, "20261012T123508Z_3A37298F72373DFA1114.ogg"},
 	} {
 		if got := mediaRelPath(c.folder, info, &c.md); got != c.want {

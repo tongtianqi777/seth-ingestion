@@ -28,7 +28,6 @@ erDiagram
         TEXT chat_jid PK
         TEXT message_id PK
         TEXT sender
-        INTEGER is_from_me
         TEXT message_type
         TEXT body
         INTEGER media_file_count
@@ -67,7 +66,7 @@ One row per monitored group: the groups of the community that `groups.txt` lists
 | `community_jid` | TEXT | yes | The JID of the community the group belongs to |
 | `community_name` | TEXT | yes | The community's name, e.g. `Seth` |
 | `is_announcement` | INTEGER | no | `1` for the community's announcement group, otherwise `0` |
-| `media_folder` | TEXT | no | The group's folder within the media folder, e.g. `Cleanup Duties-Campus Security`. Set from the name when the group is first recorded, and kept if the group is renamed. **Unique**, compared without case. See [Media files on disk](#media-files-on-disk) |
+| `media_folder` | TEXT | no | The group's folder within the media folder, e.g. `cleanup-duties-campus-security`. Made from the name when the group is first recorded, and kept if the group is renamed. **Unique**, compared without case. See [Media files on disk](#media-files-on-disk) |
 | `first_seen_at` | TEXT | no | When the group was first recorded |
 | `updated_at` | TEXT | no | When the row was last written |
 
@@ -75,17 +74,16 @@ To get a message's group, join on `chat_groups.group_jid = messages.chat_jid`. T
 
 ### `messages`
 
-One row per WhatsApp message in a monitored group, including your own.
+One row per WhatsApp message in a monitored group. Your own messages are recorded the same way as everyone else's.
 
 | Column | Type | Null? | Description |
 |---|---|---|---|
 | `chat_jid` | TEXT | no | The group the message was sent in (`…@g.us`); joins to `chat_groups.group_jid`. On rows from the earlier single-contact version, the contact's JID. **Primary key**, with `message_id` |
 | `message_id` | TEXT | no | WhatsApp message ID. **Primary key**, with `chat_jid`. For an album, this is the album's own message ID |
-| `sender` | TEXT | no | The sender as WhatsApp labels them in the group, at the time of the message: your saved contact name for them, otherwise the name they set for themselves, otherwise `+<phone>`. For your own messages, your saved name for yourself or your own display name. It can change over time, so group by `sender_phone` or `sender_jid` to find one person's messages. Rows from the earlier single-contact version have the configured contact name |
+| `sender` | TEXT | no | The sender as WhatsApp labels them in the group, at the time of the message: your saved contact name for them, otherwise the name they set for themselves, otherwise `+<phone>`. It can change over time, so group by `sender_phone` or `sender_jid` to find one person's messages. Rows from the earlier single-contact version have the configured contact name |
 | `sender_jid` | TEXT | no | The sender's JID as WhatsApp sent it. May be a phone JID or a LID |
 | `sender_phone` | TEXT | yes | The sender's phone number in international format, digits only, e.g. `14125778174`. Resolved from a LID when needed |
-| `sender_name` | TEXT | yes | The display name the sender has set for themselves in WhatsApp, at the time of the message. Often missing for your own messages from history |
-| `is_from_me` | INTEGER | no | `1` if you sent the message, otherwise `0` |
+| `sender_name` | TEXT | yes | The display name the sender has set for themselves in WhatsApp, at the time of the message. Can be missing on messages from history |
 | `is_group` | INTEGER | no | `1` for group messages. `0` on rows from the earlier single-contact version |
 | `sent_at` | TEXT | no | When WhatsApp says the message was sent. For an album, the earliest time seen across the album and its items |
 | `ingested_at` | TEXT | no | When seth-ingestion first wrote the row |
@@ -121,7 +119,7 @@ One row per media file that a message carried, whether or not the download worke
 | `media_type` | TEXT | no | `image`, `video`, `audio`, `voice` (a recorded voice note), `document` or `sticker` |
 | `caption` | TEXT | yes | This file's own caption |
 | `file_name` | TEXT | yes | The original file name. Only documents have one |
-| `relative_path` | TEXT | yes | Where the file was saved, relative to the media folder, always with `/` separators, e.g. `Preschool/20261012T053508Z_3A37298F72373DFA1114.jpg`. Starts with the group's `media_folder`. `NULL` if the download failed |
+| `relative_path` | TEXT | yes | Where the file was saved, relative to the media folder, always with `/` separators, e.g. `preschool/20261012T053508Z_3A37298F72373DFA1114.jpg`. Starts with the group's `media_folder`. `NULL` if the download failed |
 | `mime` | TEXT | yes | MIME type as reported by WhatsApp, e.g. `image/jpeg` or `audio/ogg; codecs=opus` |
 | `size` | INTEGER | yes | File size in bytes |
 | `sha256` | TEXT | yes | Hex SHA-256 of the saved file. The same picture sent twice has the same value |
@@ -224,12 +222,12 @@ This happens when an album's items arrive before the album message, and when his
 
 ## Media files on disk
 
-- Every file goes into its group's folder within the media folder: `<media_folder>/<sent time, UTC>_<source message id><extension>`, for example `Preschool/20261012T053508Z_3A37298F72373DFA1114.jpg`.
-- A group's folder is named after the group when it's first recorded. Characters that macOS, Linux or Windows don't allow in names (`/ \ : * ? " < > |`) become `-`, so `Cleanup Duties/Campus Security` gets `Cleanup Duties-Campus Security`. If another group already has that folder (compared without case, as on macOS), the new one gets ` (2)`, ` (3)`, …. The folder doesn't change when the group is renamed, and `chat_groups.media_folder` always records it.
+- Every file goes into its group's folder within the media folder: `<media_folder>/<sent time, UTC>_<source message id><extension>`, for example `preschool/20261012T053508Z_3A37298F72373DFA1114.jpg`.
+- A group's folder name is made from the group's name when it's first recorded: lowercase letters and digits, with a dash in place of each run of spaces and other characters. Dots and apostrophes are dropped. So `Cleanup Duties/Campus Security` gets `cleanup-duties-campus-security`, `Preschool P.E. Teachers` gets `preschool-pe-teachers` and `Facilities & Outdoor` gets `facilities-outdoor`. A name with no letters or digits (only emoji, say) gets the group's ID. If another group already has that folder, the new one gets `-2`, `-3`, …. The folder doesn't change when the group is renamed, and `chat_groups.media_folder` always records it.
 - Files from the earlier single-contact version are at the top of the media folder, without a group folder.
 - The extension comes from the document's own file name if it has one, and otherwise from the MIME type.
 - To get a file's full path, join the media folder and `relative_path`. Only the relative path is stored, so the folder can move without breaking anything.
-- The program creates any missing folders before saving. Paths could include more subfolders later (for example `Preschool/2026/10/…`) without any schema change.
+- The program creates any missing folders before saving. Paths could include more subfolders later (for example `preschool/2026/10/…`) without any schema change.
 - Nothing removes files. Deleting rows from the database leaves the files on disk.
 
 ## Example queries
@@ -331,7 +329,7 @@ On every start, `db.Open` brings the database up to date. Nothing needs to be se
 
 ```mermaid
 flowchart TD
-    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count, is_from_me)"]
+    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count)"]
     Migrate --> Schema["run schema.sql:<br/>CREATE TABLE / INDEX IF NOT EXISTS"]
     Schema --> Sender["Store.BackfillSender:<br/>set sender on old rows that have none"]
     Sender --> Legacy["Store.MigrateLegacyMedia:<br/>move old media columns into message_media_files,<br/>then drop them (one transaction)"]
