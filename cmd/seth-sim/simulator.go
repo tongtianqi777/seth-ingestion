@@ -24,6 +24,7 @@ import (
 
 type simulator struct {
 	store    *db.Store
+	write    *sql.DB // for the simulated_events ground truth
 	dbPath   string
 	read     *sql.DB // for looking up earlier messages to reply to, edit or react to
 	mediaDir string
@@ -38,6 +39,9 @@ func newSimulator(store *db.Store, dbPath, mediaDir string, seed int64) *simulat
 func (s *simulator) close() {
 	if s.read != nil {
 		s.read.Close()
+	}
+	if s.write != nil {
+		s.write.Close()
 	}
 	s.store.Close()
 }
@@ -111,6 +115,7 @@ type event struct {
 	source     string // live | history
 	from, text string // optional overrides (seth-sim send)
 	target     string // optional message_id for reply, edit or reaction
+	random     bool   // chosen by seed or live, rather than described with send
 }
 
 func (s *simulator) seed(ctx context.Context, days, perDay int) error {
@@ -129,7 +134,7 @@ func (s *simulator) seed(ctx context.Context, days, perDay int) error {
 		if at.After(end) {
 			at = end
 		}
-		if err := s.emit(ctx, event{group: s.pickGroup(), kind: s.pickKind(), at: at, source: "history"}); err != nil {
+		if err := s.emit(ctx, event{group: s.pickGroup(), kind: s.pickKind(), at: at, source: "history", random: true}); err != nil {
 			return err
 		}
 	}
@@ -151,7 +156,7 @@ func (s *simulator) live(ctx context.Context, interval time.Duration, count int)
 			case <-time.After(wait):
 			}
 		}
-		if err := s.emit(ctx, event{group: s.pickGroup(), kind: s.pickKind(), at: time.Now(), source: "live"}); err != nil {
+		if err := s.emit(ctx, event{group: s.pickGroup(), kind: s.pickKind(), at: time.Now(), source: "live", random: true}); err != nil {
 			return err
 		}
 	}
@@ -166,14 +171,23 @@ func (s *simulator) schoolHour(t time.Time) time.Time {
 	return day.Add(time.Duration(s.rng.Int63n(int64(14 * time.Hour))))
 }
 
+// pickGroup picks the group for the next message. About one in eight goes
+// to Announcements, twice as often as to any one other group, so agents that
+// follow the school calendar get a steady stream of event posts.
 func (s *simulator) pickGroup() *db.Group {
-	// Announcements are rarer than chatter in the other groups.
-	for {
-		g := s.groups[s.rng.Intn(len(s.groups))]
-		if !g.IsAnnouncement || s.rng.Intn(3) == 0 {
-			return g
+	var announcements *db.Group
+	var others []*db.Group
+	for _, g := range s.groups {
+		if g.IsAnnouncement {
+			announcements = g
+		} else {
+			others = append(others, g)
 		}
 	}
+	if announcements != nil && (len(others) == 0 || s.rng.Intn(8) == 0) {
+		return announcements
+	}
+	return others[s.rng.Intn(len(others))]
 }
 
 func (s *simulator) pickKind() *kind {
@@ -222,7 +236,18 @@ func simJID(name string) string {
 func (s *simulator) emit(ctx context.Context, e event) error {
 	g := e.group
 	from := s.pickPerson(g, e.from)
+	if e.random && g.IsAnnouncement {
+		switch e.kind.name {
+		case "reply", "reaction", "voice", "album", "failed":
+			e.kind = kindByName("text") // staff post announcements; they don't chat
+		}
+	}
 	text := e.text
+	var fact *eventFact
+	if text == "" && g.IsAnnouncement && e.kind.name == "text" && s.rng.Intn(100) < 75 {
+		t, f := s.eventAnnouncement(e.at)
+		text, fact = t, &f
+	}
 	if text == "" {
 		text = s.line(g)
 	}
@@ -250,6 +275,9 @@ func (s *simulator) emit(ctx context.Context, e event) error {
 			// Only the sender can edit a message, so the edit comes from them.
 			m.Sender, m.SenderJID, m.SenderPhone, m.SenderName = t.sender, t.senderJID, t.senderPhone, strings.Fields(t.sender)[0]
 			newText := t.body + " (updated: " + s.pick(editNotes) + ")"
+			if text, f, ok := s.eventCorrection(ctx, g.JID, t.id, e.at); ok && e.text == "" {
+				newText, fact = text, &f
+			}
 			if e.text != "" {
 				newText = e.text
 			}
@@ -321,6 +349,11 @@ func (s *simulator) emit(ctx context.Context, e event) error {
 
 	if _, err := s.store.Save(ctx, m, files); err != nil {
 		return err
+	}
+	if fact != nil {
+		if err := recordEvent(ctx, s.write, m.ChatJID, m.MessageID, *fact); err != nil {
+			return fmt.Errorf("record simulated event: %w", err)
+		}
 	}
 	s.print(g, m, summary)
 	return nil

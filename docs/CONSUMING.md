@@ -182,6 +182,40 @@ All commands also take `-db`, `-media-dir`, `-groups-file` and `-seed`. Run `./s
 
 **What you get.** Texts, replies, edits, photos, albums of 2 to 4 photos, PDF documents, voice notes, reactions (`other` rows) and downloads that failed, in every group in `groups.txt`. Announcements come from staff only. Some senders have no phone number, as happens in real groups. `send -kind` picks one of `text`, `reply`, `edit`, `image`, `album`, `document`, `voice`, `reaction` or `failed`; `-target` chooses the message a reply, edit or reaction points at.
 
+### School events, for calendar agents
+
+Announcements make up about one message in eight, and most of them are about school events, the way a school office writes them:
+
+- **New events:** "📅 The fall family picnic is on Sat, Oct 24 at 11am. Bring a dish to share!"
+- **Reminders** for the next few days: "Reminder: school picture day is tomorrow."
+- **Deadlines:** "Permission slips for the field trip to the pumpkin patch on 10/27 are due by Friday, October 23."
+- **Reschedules:** "Update: chapel with a guest speaker has been moved from Oct 21 to Nov 4 at 9am."
+- **Cancellations:** "The bake sale fundraiser on Friday, October 23 is cancelled because of low sign-ups."
+- **Corrections** by editing an earlier post: an `edit` row saying "Correction: parent-teacher conferences are now Fri, Oct 30 to 10/31."
+- **Multi-day events,** such as the book fair or Thanksgiving break.
+
+Dates are written in mixed formats, relative to when the message was sent: "tomorrow", "this Friday", "Monday, October 19", "Mon, Oct 19", "10/19", "Oct 19" and "Monday 10/19/2026". Times are written as "11am", "6:30pm" or "6:30 PM". Seasonal events stay in season: the pumpkin patch is in October, the Christmas program in December, and Thanksgiving break in Thanksgiving week.
+
+**Checking your agent's answers.** Each event post also has a row in `simulated_events`, which exists only in simulated databases. It records what the post really means, so a test can compare what your agent extracted with what was announced:
+
+| Column | Meaning |
+|---|---|
+| `chat_jid`, `message_id` | The post (or edit) that announced it |
+| `event` | Which event, e.g. `fall family picnic` |
+| `action` | `scheduled`, `reminder`, `deadline`, `rescheduled` or `cancelled` |
+| `starts_at` | When it starts, in the school's local time: `2026-10-24T11:00:00-07:00`, or a date like `2026-10-24` for an all-day event |
+| `ends_on` | The last day of a multi-day event |
+| `all_day` | `1` for an all-day event |
+| `previous_starts_at` | For `rescheduled`: the date it moved from |
+| `deadline_on` | For `deadline`: the day the permission slips are due |
+
+```sql
+SELECT m.sent_at, m.body, e.action, e.starts_at, e.previous_starts_at, e.deadline_on
+FROM simulated_events e
+JOIN messages m USING (chat_jid, message_id)
+ORDER BY m.rowid;
+```
+
 **Things to know**
 
 - **It's all invented.** People, phone numbers (in the 555-01xx range, which is reserved for fiction), group IDs and messages are made up. The group IDs differ from the real ones, so don't hard-code them.

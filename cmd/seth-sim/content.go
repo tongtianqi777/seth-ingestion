@@ -32,13 +32,12 @@ var generalLines = []string{
 
 // groupLines are keyed by grouplist.Key of the group name.
 var groupLines = map[string][]string{
+	// Most announcements are about events, with dates: see events.go.
 	"announcements": {
 		"Tomorrow please drop off and pick up kids through the backyard gate.",
-		"Reminder: school picture day is this Thursday. Please send your child in uniform.",
-		"Early dismissal this Friday at 12:30pm for teacher training.",
-		"The school office will be closed Monday for the holiday.",
-		"Fall family picnic is on Saturday at 11am. Bring a dish to share!",
 		"Tuition for next month is due by the 5th. Thank you!",
+		"Please label your child's jacket and lunch box. The lost and found is overflowing!",
+		"Thank you to all the volunteers who helped this week ❤️",
 	},
 	"family connection": {
 		"Hello families, the Sunday School Director from Resurrection Church extended an invitation to our families.",

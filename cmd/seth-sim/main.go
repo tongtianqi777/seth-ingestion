@@ -139,6 +139,10 @@ func open(ctx context.Context, c common) (*simulator, error) {
 		seed = time.Now().UnixNano()
 	}
 	sim := newSimulator(store, c.dbPath, c.mediaDir, seed)
+	if sim.write, err = sql.Open("sqlite3", "file:"+c.dbPath+"?_busy_timeout=5000"); err != nil {
+		store.Close()
+		return nil, err
+	}
 	communityJID := simJID("community " + c.community)
 	for _, name := range names {
 		isAnnouncement := grouplist.Key(name) == "announcements"
@@ -203,5 +207,9 @@ func markSimulated(ctx context.Context, dbPath string, seed int64) error {
 		SELECT ?, ?, 'Made by seth-sim. Every message, person and phone number here is invented.'
 		WHERE NOT EXISTS (SELECT 1 FROM simulation)`,
 		time.Now().UTC().Format(time.RFC3339), seed)
+	if err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, eventsSchema)
 	return err
 }
