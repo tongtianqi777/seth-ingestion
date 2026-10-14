@@ -122,6 +122,11 @@ func TestMigrateLegacyMedia(t *testing.T) {
 			t.Errorf("column %s not dropped", c)
 		}
 	}
+	for _, c := range []string{"media_file_count", "is_from_me"} {
+		if !cols[c] {
+			t.Errorf("column %s not added", c)
+		}
+	}
 	rows, err := s.db.Query(`
 		SELECT a.message_id, a.relative_path, a.caption, m.media_file_count
 		FROM message_media_files a JOIN messages m USING (chat_jid, message_id) ORDER BY a.message_id`)
@@ -142,5 +147,80 @@ func TestMigrateLegacyMedia(t *testing.T) {
 	want := []string{"IMG1|a.jpg|cap|1", "IMG2|sub/b.jpg||1"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("media files = %v, want %v", got, want)
+	}
+}
+
+func TestSaveGroup(t *testing.T) {
+	ctx := context.Background()
+	s := openTemp(t)
+	save := func(g Group) Group {
+		t.Helper()
+		saved, err := s.SaveGroup(ctx, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return saved
+	}
+
+	acorn := save(Group{JID: "1@g.us", Name: "Acorn", CommunityJID: "100@g.us", CommunityName: "Seth", MediaFolder: "Acorn"})
+	if acorn.MediaFolder != "Acorn" {
+		t.Errorf("new group's folder = %q, want Acorn", acorn.MediaFolder)
+	}
+	// A different group whose folder name differs only in case gets its own folder,
+	// as the two would be the same folder on macOS.
+	if other := save(Group{JID: "2@g.us", Name: "acorn", MediaFolder: "acorn"}); other.MediaFolder != "acorn (2)" {
+		t.Errorf("second group's folder = %q, want %q", other.MediaFolder, "acorn (2)")
+	}
+	// Saving an existing group (for example after a rename) updates its name but keeps its folder.
+	if again := save(Group{JID: "1@g.us", Name: "Acorn Class", CommunityJID: "100@g.us", CommunityName: "Seth", MediaFolder: "Acorn Class"}); again.MediaFolder != "Acorn" {
+		t.Errorf("existing group's folder = %q, want Acorn", again.MediaFolder)
+	}
+	if err := s.RenameGroup(ctx, "2@g.us", "Acorn Parents"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.db.Query(`SELECT group_jid, name, COALESCE(community_name, ''), media_folder FROM chat_groups ORDER BY group_jid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var jid, name, community, folder string
+		if err := rows.Scan(&jid, &name, &community, &folder); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, jid+"|"+name+"|"+community+"|"+folder)
+	}
+	want := []string{"1@g.us|Acorn Class|Seth|Acorn", "2@g.us|Acorn Parents||acorn (2)"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("chat_groups = %q, want %q", got, want)
+	}
+}
+
+func TestBackfillSender(t *testing.T) {
+	ctx := context.Background()
+	s := openTemp(t)
+	for _, m := range []*Message{
+		{ChatJID: "c", MessageID: "NAMED", SenderJID: "5@lid", SenderName: "Liwen", SenderPhone: "15550000003", SentAt: time.Now(), MessageType: "text", Source: "live"},
+		{ChatJID: "c", MessageID: "PHONE", SenderJID: "6@lid", SenderPhone: "15550000004", SentAt: time.Now(), MessageType: "text", Source: "live"},
+		{ChatJID: "c", MessageID: "JID", SenderJID: "7@lid", SentAt: time.Now(), MessageType: "text", Source: "live"},
+		{ChatJID: "c", MessageID: "KEPT", Sender: "Ziwei Hu", SenderJID: "8@lid", SenderName: "Ziwei", SentAt: time.Now(), MessageType: "text", Source: "live"},
+	} {
+		if _, err := s.Save(ctx, m, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := s.BackfillSender(ctx); err != nil || n != 3 {
+		t.Fatalf("BackfillSender = %d, %v; want 3", n, err)
+	}
+	for id, want := range map[string]string{"NAMED": "Liwen", "PHONE": "+15550000004", "JID": "7@lid", "KEPT": "Ziwei Hu"} {
+		var sender string
+		if err := s.db.QueryRow(`SELECT sender FROM messages WHERE message_id = ?`, id).Scan(&sender); err != nil {
+			t.Fatal(err)
+		}
+		if sender != want {
+			t.Errorf("sender of %s = %q, want %q", id, sender, want)
+		}
 	}
 }

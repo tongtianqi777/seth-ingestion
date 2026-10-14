@@ -8,19 +8,27 @@ The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in 
 
 | Store | Location | Owner | Contents |
 |---|---|---|---|
-| Message database | `data/messages.db` (`-data-dir`) | seth-ingestion | `messages` and `message_media_files` |
-| Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` (`-media-dir`) | seth-ingestion | the downloaded files that `message_media_files` points to |
+| Message database | `data/messages.db` (`-data-dir`) | seth-ingestion | `chat_groups`, `messages` and `message_media_files` |
+| Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` (`-media-dir`) | seth-ingestion | the downloaded files that `message_media_files` points to, in a folder per group |
 | Session database | `data/whatsmeow-session.db` | whatsmeow | device keys, the login session and contact mappings. **Don't write to it.** whatsmeow creates and upgrades it itself |
 
 Both databases are SQLite. The message database runs in WAL mode, so it's normal to see `messages.db-wal` and `messages.db-shm` next to it. You can read the database with `sqlite3` or any SQLite viewer while the program is running.
 
 ```mermaid
 erDiagram
+    chat_groups ||--o{ messages : "group_jid = chat_jid"
     messages ||--o{ message_media_files : "has 0..n"
+    chat_groups {
+        TEXT group_jid PK
+        TEXT name
+        TEXT community_name
+        TEXT media_folder UK
+    }
     messages {
         TEXT chat_jid PK
         TEXT message_id PK
         TEXT sender
+        INTEGER is_from_me
         TEXT message_type
         TEXT body
         INTEGER media_file_count
@@ -37,30 +45,48 @@ erDiagram
     }
 ```
 
-Each WhatsApp message is **exactly one** row in `messages`, even when it has several files. Each downloaded file is one row in `message_media_files`, which points back to its message.
+Each recorded group is one row in `chat_groups`. Each WhatsApp message is **exactly one** row in `messages`, even when it has several files, and its `chat_jid` is the group it was sent in. Each downloaded file is one row in `message_media_files`, which points back to its message.
 
 ## Conventions
 
 - **Timestamps** are RFC3339 strings in UTC, such as `2026-10-12T05:35:08Z`. They sort correctly as text, and SQLite date functions accept them: `datetime(sent_at, 'localtime')`.
 - **Empty values are stored as `NULL`**, not as an empty string. The exception is `sender`, which is `NOT NULL DEFAULT ''`.
-- **JIDs** are WhatsApp addresses. A user's JID is either `<phone>@s.whatsapp.net` or an opaque LID such as `216865834029298@lid`. WhatsApp is moving to LIDs, so don't parse phone numbers out of JIDs. Use `sender_phone`.
+- **JIDs** are WhatsApp addresses. A group's JID looks like `120363012345678901@g.us`. A user's JID is either `<phone>@s.whatsapp.net` or an opaque LID such as `216865834029298@lid`. WhatsApp is moving to LIDs, so don't parse phone numbers out of JIDs. Use `sender_phone`.
 - **Message IDs** are WhatsApp's own IDs, such as `3A37298F72373DFA1114`. They are unique within a chat, which is why keys always pair them with `chat_jid`.
 
 ## Tables
 
-### `messages`
+### `chat_groups`
 
-One row per WhatsApp message from the monitored contact, in a direct chat.
+One row per monitored group: the groups of the community that `groups.txt` lists and that were found when the program started. A row is written the first time a group is found, and updated on each start and when the group is renamed. Rows are never deleted, so a group removed from `groups.txt` keeps its row and its messages.
 
 | Column | Type | Null? | Description |
 |---|---|---|---|
-| `chat_jid` | TEXT | no | The chat the message was sent in. Only direct chats are ingested, so this is the contact's JID. **Primary key**, with `message_id` |
+| `group_jid` | TEXT | no | The group's JID. **Primary key**. `messages.chat_jid` holds the same value |
+| `name` | TEXT | no | The group's current name, as WhatsApp shows it. The community's announcement group is always `Announcements` |
+| `community_jid` | TEXT | yes | The JID of the community the group belongs to |
+| `community_name` | TEXT | yes | The community's name, e.g. `Seth` |
+| `is_announcement` | INTEGER | no | `1` for the community's announcement group, otherwise `0` |
+| `media_folder` | TEXT | no | The group's folder within the media folder, e.g. `Cleanup Duties-Campus Security`. Set from the name when the group is first recorded, and kept if the group is renamed. **Unique**, compared without case. See [Media files on disk](#media-files-on-disk) |
+| `first_seen_at` | TEXT | no | When the group was first recorded |
+| `updated_at` | TEXT | no | When the row was last written |
+
+To get a message's group, join on `chat_groups.group_jid = messages.chat_jid`. There's no foreign key, because rows from the earlier single-contact version have a contact's JID in `chat_jid`.
+
+### `messages`
+
+One row per WhatsApp message in a monitored group, including your own.
+
+| Column | Type | Null? | Description |
+|---|---|---|---|
+| `chat_jid` | TEXT | no | The group the message was sent in (`…@g.us`); joins to `chat_groups.group_jid`. On rows from the earlier single-contact version, the contact's JID. **Primary key**, with `message_id` |
 | `message_id` | TEXT | no | WhatsApp message ID. **Primary key**, with `chat_jid`. For an album, this is the album's own message ID |
-| `sender` | TEXT | no | The monitored contact's name as configured with `-contact-name`, e.g. `Ziwei Hu`. A stable label you control, for grouping by contact |
+| `sender` | TEXT | no | The sender as WhatsApp labels them in the group, at the time of the message: your saved contact name for them, otherwise the name they set for themselves, otherwise `+<phone>`. For your own messages, your saved name for yourself or your own display name. It can change over time, so group by `sender_phone` or `sender_jid` to find one person's messages. Rows from the earlier single-contact version have the configured contact name |
 | `sender_jid` | TEXT | no | The sender's JID as WhatsApp sent it. May be a phone JID or a LID |
 | `sender_phone` | TEXT | yes | The sender's phone number in international format, digits only, e.g. `14125778174`. Resolved from a LID when needed |
-| `sender_name` | TEXT | yes | The display name the contact has set for themselves in WhatsApp at the time of the message. It can change over time, so group by `sender`, not by this |
-| `is_group` | INTEGER | no | Always `0`. Only rows captured by a very early version, before group messages were excluded, can have `1` |
+| `sender_name` | TEXT | yes | The display name the sender has set for themselves in WhatsApp, at the time of the message. Often missing for your own messages from history |
+| `is_from_me` | INTEGER | no | `1` if you sent the message, otherwise `0` |
+| `is_group` | INTEGER | no | `1` for group messages. `0` on rows from the earlier single-contact version |
 | `sent_at` | TEXT | no | When WhatsApp says the message was sent. For an album, the earliest time seen across the album and its items |
 | `ingested_at` | TEXT | no | When seth-ingestion first wrote the row |
 | `message_type` | TEXT | no | What kind of message this is. See [Message types](#message-types) |
@@ -77,8 +103,9 @@ Indexes:
 |---|---|---|
 | primary key | `chat_jid, message_id` | looking up a message; preventing duplicates |
 | `idx_messages_sent_at` | `sent_at` | listing messages by time |
-| `idx_messages_sender` | `sender, sent_at` | one contact's messages by time |
-| `idx_messages_sender_phone` | `sender_phone, sent_at` | the same, by phone number |
+| `idx_messages_chat_sent_at` | `chat_jid, sent_at` | one group's messages by time |
+| `idx_messages_sender` | `sender, sent_at` | messages by sender name, by time |
+| `idx_messages_sender_phone` | `sender_phone, sent_at` | one person's messages by time, by phone number |
 
 ### `message_media_files`
 
@@ -94,7 +121,7 @@ One row per media file that a message carried, whether or not the download worke
 | `media_type` | TEXT | no | `image`, `video`, `audio`, `voice` (a recorded voice note), `document` or `sticker` |
 | `caption` | TEXT | yes | This file's own caption |
 | `file_name` | TEXT | yes | The original file name. Only documents have one |
-| `relative_path` | TEXT | yes | Where the file was saved, relative to the media folder, always with `/` separators. `NULL` if the download failed |
+| `relative_path` | TEXT | yes | Where the file was saved, relative to the media folder, always with `/` separators, e.g. `Preschool/20261012T053508Z_3A37298F72373DFA1114.jpg`. Starts with the group's `media_folder`. `NULL` if the download failed |
 | `mime` | TEXT | yes | MIME type as reported by WhatsApp, e.g. `image/jpeg` or `audio/ogg; codecs=opus` |
 | `size` | INTEGER | yes | File size in bytes |
 | `sha256` | TEXT | yes | Hex SHA-256 of the saved file. The same picture sent twice has the same value |
@@ -116,7 +143,7 @@ WhatsApp delivers each file in its own message, with its own ID. Most of the tim
 - **`message_id`**: the `messages` row the file is listed under. For album photos, this is the album's ID.
 - **`source_message_id`**: the WhatsApp message that delivered the file. For album photos, this is the photo's own ID.
 
-For example, she sends one photo (message `P1`), then later an album of two photos (album message `A`, delivered as photo messages `A1` and `A2`):
+For example, someone sends one photo (message `P1`), then later an album of two photos (album message `A`, delivered as photo messages `A1` and `A2`):
 
 | `messages.message_id` | `message_type` | `message_media_files` rows (`message_id`, `source_message_id`, `position`) |
 |---|---|---|
@@ -142,7 +169,7 @@ View-once and disappearing messages are stored like ordinary ones. whatsmeow unw
 
 **Edits** are stored as separate `edit` rows, and the original message's row is left unchanged. To get the latest text of a message, look for the newest `edit` row whose `edit_target_id` is that message's ID.
 
-**Not stored:** messages you send, messages in groups, status updates, broadcast lists and newsletters. The program filters these out before anything is written.
+**Not stored:** messages in groups that aren't monitored, direct chats, status updates, broadcast lists and newsletters. The program filters these out before anything is written. Notices in a group's history with no message content, such as "… joined from the community", are skipped too.
 
 ## Albums
 
@@ -197,30 +224,54 @@ This happens when an album's items arrive before the album message, and when his
 
 ## Media files on disk
 
-- Every file goes directly into the media folder. The name is `<sent time, UTC>_<source message id><extension>`, for example `20261012T053508Z_3A37298F72373DFA1114.jpg`.
+- Every file goes into its group's folder within the media folder: `<media_folder>/<sent time, UTC>_<source message id><extension>`, for example `Preschool/20261012T053508Z_3A37298F72373DFA1114.jpg`.
+- A group's folder is named after the group when it's first recorded. Characters that macOS, Linux or Windows don't allow in names (`/ \ : * ? " < > |`) become `-`, so `Cleanup Duties/Campus Security` gets `Cleanup Duties-Campus Security`. If another group already has that folder (compared without case, as on macOS), the new one gets ` (2)`, ` (3)`, …. The folder doesn't change when the group is renamed, and `chat_groups.media_folder` always records it.
+- Files from the earlier single-contact version are at the top of the media folder, without a group folder.
 - The extension comes from the document's own file name if it has one, and otherwise from the MIME type.
 - To get a file's full path, join the media folder and `relative_path`. Only the relative path is stored, so the folder can move without breaking anything.
-- The program creates any missing folders before saving. File names could include subfolders later (for example `2026/10/…`) without any schema change.
+- The program creates any missing folders before saving. Paths could include more subfolders later (for example `Preschool/2026/10/…`) without any schema change.
 - Nothing removes files. Deleting rows from the database leaves the files on disk.
 
 ## Example queries
 
 Run these with `sqlite3 -header -column data/messages.db "<query>"`.
 
-Latest messages:
+Latest messages, with their groups:
 
 ```sql
-SELECT datetime(sent_at, 'localtime') AS sent, message_type, body, media_file_count
-FROM messages
-ORDER BY sent_at DESC
+SELECT datetime(m.sent_at, 'localtime') AS sent, g.name AS grp, m.sender, m.message_type, m.body, m.media_file_count
+FROM messages m
+JOIN chat_groups g ON g.group_jid = m.chat_jid
+ORDER BY m.sent_at DESC
 LIMIT 20;
 ```
 
-Every file with its message, albums in order:
+One group's conversation, oldest first:
 
 ```sql
-SELECT m.sent_at, m.message_type, f.position, f.media_type, f.relative_path, f.caption
+SELECT datetime(m.sent_at, 'localtime') AS sent, m.sender, m.message_type, m.body
 FROM messages m
+JOIN chat_groups g ON g.group_jid = m.chat_jid
+WHERE g.name = 'Preschool'
+ORDER BY m.sent_at;
+```
+
+Messages per group:
+
+```sql
+SELECT g.name, COUNT(m.message_id) AS messages, MAX(m.sent_at) AS latest
+FROM chat_groups g
+LEFT JOIN messages m ON m.chat_jid = g.group_jid
+GROUP BY g.group_jid
+ORDER BY latest DESC;
+```
+
+Every file with its message and group, albums in order:
+
+```sql
+SELECT m.sent_at, g.name AS grp, m.message_type, f.position, f.media_type, f.relative_path, f.caption
+FROM messages m
+JOIN chat_groups g ON g.group_jid = m.chat_jid
 JOIN message_media_files f USING (chat_jid, message_id)
 ORDER BY m.sent_at DESC, f.position;
 ```
@@ -280,7 +331,7 @@ On every start, `db.Open` brings the database up to date. Nothing needs to be se
 
 ```mermaid
 flowchart TD
-    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count)"]
+    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count, is_from_me)"]
     Migrate --> Schema["run schema.sql:<br/>CREATE TABLE / INDEX IF NOT EXISTS"]
     Schema --> Sender["Store.BackfillSender:<br/>set sender on old rows that have none"]
     Sender --> Legacy["Store.MigrateLegacyMedia:<br/>move old media columns into message_media_files,<br/>then drop them (one transaction)"]
@@ -288,7 +339,8 @@ flowchart TD
 
 - **`schema.sql` always describes the full current schema.** A new database is created from it directly. Every statement is `IF NOT EXISTS`, so running it again is harmless.
 - **`migrate` runs before `schema.sql`.** An index in `schema.sql` may refer to a column that an older table doesn't have yet. Adding the column first lets the index be created.
-- **`BackfillSender`** fills in `sender` with the configured contact name on rows from that contact's phone number that were written before the column existed.
+- **`schema.sql`** also creates `chat_groups`, and the `chat_jid, sent_at` index, on databases that don't have them yet.
+- **`BackfillSender`** fills in `sender` on rows written before the column existed, with the row's `sender_name`, or else `+<sender_phone>`, or else `sender_jid`.
 - **`MigrateLegacyMedia`** upgrades databases from versions that stored at most one image per message directly on `messages`, in the columns `media_path`, `image_relative_path`, `media_mime`, `media_size`, `media_sha256` and `media_error`. It copies each image into `message_media_files`, drops those columns and recomputes `media_file_count`, all in one transaction. It needs the media folder to work out relative paths, so `main.go` calls it after `Open`. Once the old columns are gone it does nothing.
 
 To change the schema:

@@ -1,6 +1,6 @@
 // Command seth-ingestion logs into WhatsApp as a linked device and records
-// every message and image sent by one contact into a local SQLite database
-// and image folder.
+// the messages and media of selected groups in a WhatsApp community into a
+// local SQLite database and media folder.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -25,28 +26,28 @@ import (
 
 func main() {
 	var (
-		contactPhone = flag.String("contact-phone", env("SETH_CONTACT_PHONE", "14125778174"), "phone number of the contact to monitor, with country code")
-		contactName  = flag.String("contact-name", env("SETH_CONTACT_NAME", "Ziwei Hu"), "name of the contact, stored in the sender column")
-		dataDir      = flag.String("data-dir", env("SETH_DATA_DIR", "./data"), "directory for the session and message databases")
-		mediaDir     = flag.String("media-dir", env("SETH_MEDIA_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "directory to save images and other media into")
-		logLevel     = flag.String("log-level", env("SETH_LOG_LEVEL", "INFO"), "DEBUG, INFO, WARN or ERROR")
+		community  = flag.String("community", env("SETH_COMMUNITY", "Seth"), "name (or group JID) of the WhatsApp community whose groups to record")
+		groupsFile = flag.String("groups-file", env("SETH_GROUPS_FILE", "groups.txt"), "file listing the community's groups to record, one name per line")
+		dataDir    = flag.String("data-dir", env("SETH_DATA_DIR", "./data"), "directory for the session and message databases")
+		mediaDir   = flag.String("media-dir", env("SETH_MEDIA_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "directory to save images and other media into, in a folder per group")
+		logLevel   = flag.String("log-level", env("SETH_LOG_LEVEL", "INFO"), "DEBUG, INFO, WARN or ERROR")
 	)
 	flag.Parse()
 
-	if err := run(*contactPhone, *contactName, *dataDir, *mediaDir, *logLevel); err != nil {
+	if err := run(*community, *groupsFile, *dataDir, *mediaDir, *logLevel); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(contactPhone, contactName, dataDir, mediaDir, logLevel string) error {
+func run(community, groupsFile, dataDir, mediaDir, logLevel string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	log := waLog.Stdout("Main", logLevel, true)
-	phone := digitsOnly(contactPhone)
-	if len(phone) == 10 {
-		phone = "1" + phone // assume a US number when no country code is given
+	groupNames, err := readGroupsFile(groupsFile)
+	if err != nil {
+		return fmt.Errorf("read groups file: %w", err)
 	}
 
 	for _, dir := range []string{dataDir, mediaDir} {
@@ -66,10 +67,10 @@ func run(contactPhone, contactName, dataDir, mediaDir, logLevel string) error {
 		return fmt.Errorf("open message store: %w", err)
 	}
 	defer store.Close()
-	if n, err := store.BackfillSender(ctx, phone, contactName); err != nil {
+	if n, err := store.BackfillSender(ctx); err != nil {
 		return fmt.Errorf("backfill sender: %w", err)
 	} else if n > 0 {
-		log.Infof("Set sender = %q on %d existing messages", contactName, n)
+		log.Infof("Set sender on %d existing messages", n)
 	}
 	if n, err := store.MigrateLegacyMedia(ctx, mediaDir); err != nil {
 		return fmt.Errorf("move media to message_media_files: %w", err)
@@ -77,7 +78,7 @@ func run(contactPhone, contactName, dataDir, mediaDir, logLevel string) error {
 		log.Infof("Moved %d existing media files into message_media_files", n)
 	}
 
-	cfg := sessionConfig{store: store, phone: phone, contactName: contactName, dataDir: dataDir, mediaDir: mediaDir, log: log}
+	cfg := sessionConfig{store: store, community: community, groupNames: groupNames, dataDir: dataDir, mediaDir: mediaDir, log: log}
 	for {
 		device, err := container.GetFirstDevice(ctx)
 		if err != nil {
@@ -94,12 +95,12 @@ func run(contactPhone, contactName, dataDir, mediaDir, logLevel string) error {
 }
 
 type sessionConfig struct {
-	store       *db.Store
-	phone       string
-	contactName string
-	dataDir     string
-	mediaDir    string
-	log         waLog.Logger
+	store      *db.Store
+	community  string
+	groupNames []string
+	dataDir    string
+	mediaDir   string
+	log        waLog.Logger
 }
 
 // runSession connects one linked device and ingests until shutdown or logout.
@@ -108,18 +109,19 @@ type sessionConfig struct {
 func runSession(ctx context.Context, device *store.Device, cfg sessionConfig) (relink bool, err error) {
 	log := cfg.log
 	client := whatsmeow.NewClient(device, waLog.Stdout("Client", "WARN", true))
-	ingester := NewIngester(client, cfg.store, cfg.phone, cfg.contactName, cfg.mediaDir, log)
+	ingester := NewIngester(client, cfg.store, cfg.mediaDir, log)
 	go ingester.Run(context.Background())
 	defer ingester.Stop()
 	client.AddEventHandler(ingester.HandleEvent)
 
+	connected := make(chan struct{}, 1)
 	loggedOut := make(chan struct{}, 1)
 	replaced := make(chan struct{}, 1)
 	client.AddEventHandler(func(evt any) {
 		switch evt := evt.(type) {
 		case *events.Connected:
-			log.Infof("Connected as %s. Monitoring direct messages from %s (+%s)", client.Store.ID.User, cfg.contactName, cfg.phone)
-			log.Infof("Messages -> %s, media -> %s. Press Ctrl+C to stop.", filepath.Join(cfg.dataDir, "messages.db"), cfg.mediaDir)
+			log.Infof("Connected as %s", client.Store.ID.User)
+			signalOnce(connected)
 		case *events.LoggedOut:
 			log.Warnf("Logged out by WhatsApp (reason: %s)", evt.Reason)
 			signalOnce(loggedOut)
@@ -140,14 +142,39 @@ func runSession(ctx context.Context, device *store.Device, cfg sessionConfig) (r
 	}
 	defer client.Disconnect()
 
-	select {
-	case <-ctx.Done():
-		log.Infof("Shutting down")
-		return false, nil
-	case <-loggedOut:
-		return true, nil
-	case <-replaced:
-		return false, fmt.Errorf("another process connected with this session; only run one instance at a time")
+	// The groups can only be looked up once WhatsApp has accepted the session.
+	// Until then, messages wait in the ingester's queue.
+	for found := false; ; {
+		select {
+		case <-ctx.Done():
+			log.Infof("Shutting down")
+			return false, nil
+		case <-loggedOut:
+			return true, nil
+		case <-replaced:
+			return false, fmt.Errorf("another process connected with this session; only run one instance at a time")
+		case <-connected:
+		}
+		if found {
+			continue // reconnected after a network drop; the groups are already known
+		}
+		groups, err := findGroups(ctx, client, cfg.store, cfg.community, cfg.groupNames, log)
+		if ctx.Err() != nil {
+			continue // Ctrl+C while looking up the groups
+		}
+		if err != nil {
+			return false, err
+		}
+		found = true
+		// Read the names before SetGroups: after it, only the worker may use the groups.
+		names := make([]string, 0, len(groups))
+		for _, g := range groups {
+			names = append(names, g.Name)
+		}
+		sort.Strings(names)
+		ingester.SetGroups(groups)
+		log.Infof("Recording %d groups: %s", len(names), strings.Join(names, ", "))
+		log.Infof("Messages -> %s, media -> %s. Press Ctrl+C to stop.", filepath.Join(cfg.dataDir, "messages.db"), cfg.mediaDir)
 	}
 }
 
@@ -195,13 +222,4 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func digitsOnly(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= '0' && r <= '9' {
-			return r
-		}
-		return -1
-	}, s)
 }

@@ -5,11 +5,14 @@ This guide covers how seth-ingestion is built and how to change it. For setup an
 ## Layout
 
 ```
-main.go          flags/env config, opening the stores, QR login, signal handling
-ingest.go        event handling: filtering by contact, parsing messages, downloading media
-db/schema.sql    message table DDL (embedded into the binary and applied on startup)
+main.go          flags/env config, opening the stores, QR login, signal handling, finding the groups once connected
+groups.go        reading groups.txt, picking the community's listed groups, media folder names
+ingest.go        event handling: filtering by group, parsing messages, naming senders, downloading media
+groups.txt       the groups to record (read at startup, not compiled in)
+db/schema.sql    table DDL (embedded into the binary and applied on startup)
 db/db.go         SQLite access for the message store, plus migrations from older schemas
-db/db_test.go    tests for album grouping and the legacy media migration
+db/db_test.go    tests for album grouping, groups, sender backfill and the legacy media migration
+*_test.go        tests for group selection, folder names and the ingester (against temp SQLite stores)
 run.sh           entry script: rebuilds when sources change, then runs bin/seth-ingestion
 docs/            this guide and DATABASE.md (schema and storage logic)
 data/            runtime state (git-ignored)
@@ -22,37 +25,56 @@ data/            runtime state (git-ignored)
 ```mermaid
 flowchart TD
     WA["WhatsApp"] -- websocket --> Client["whatsmeow.Client"]
-    Client -- "events.Message (live)<br/>events.HistorySync (once, after linking)" --> Handle["Ingester.HandleEvent<br/>(runs on whatsmeow's event goroutine; must stay fast)"]
-    Handle -- "from me, not a direct chat<br/>(group, status, broadcast, newsletter),<br/>or not from the target contact" --> Drop(["dropped"])
-    Handle -- "from the target contact" --> Queue[["buffered queue (1024)"]]
-    Queue --> Run["Ingester.Run (single worker)"]
+    Client -- "events.Message (live)<br/>events.HistorySync (after linking)<br/>events.GroupInfo (renames)" --> Handle["Ingester.HandleEvent<br/>(runs on whatsmeow's event goroutine; must stay fast)"]
+    Handle -- "not a group chat, or a group<br/>that isn't monitored" --> Drop(["dropped"])
+    Handle --> Queue[["buffered queue (1024)"]]
+    Connected["events.Connected"] --> Find["findGroups: GetJoinedGroups,<br/>pick the community's listed groups,<br/>record them in chat_groups"]
+    Find -- "SetGroups" --> Run
+    Queue --> Run["Ingester.Run (single worker)<br/>waits for SetGroups, then filters again"]
     Run --> Classify{"classify"}
     Classify -- "text / edit / album / other" --> Save[("db.Store.Save<br/>messages + message_media_files<br/>(one transaction)")]
     Classify -- "has media" --> Seen{"file already<br/>stored?"}
     Seen -- yes --> Skip(["skipped"])
     Seen -- no --> Download["download and decrypt"]
-    Download --> Media[("media dir")]
+    Download --> Media[("media dir/&lt;group folder&gt;")]
     Download -- "media file: relative_path,<br/>size, sha256 (or error)" --> Save
 ```
 
 - **Why a worker queue?** whatsmeow dispatches events one at a time. A slow media download inside the handler would hold up all other events, including the session's own housekeeping. The single worker also keeps rows in arrival order.
+- **Why the worker waits.** Which groups to record can only be looked up once WhatsApp has accepted the session, but history sync and live messages can arrive before that. Until `SetGroups` is called, `HandleEvent` queues every group message and every history sync, and `Run` holds them. After that, `HandleEvent` drops messages from other groups before queuing them, and the worker checks again. `Ingester.groups` is set once, before `ready` is closed, and the map isn't changed after that, so the event goroutine can read it without a lock; only the worker reads or changes the `db.Group` values in it.
 - **Idempotency.** `messages` is keyed on `(chat_jid, message_id)` and `message_media_files` is unique on `(chat_jid, source_message_id)`. A repeated message never creates a second row. Before downloading, the worker checks `MediaFileExists`, so a history sync that repeats messages doesn't fetch their files again. The full write rules are in [DATABASE.md](DATABASE.md#write-rules).
-- **Sessions and logout.** `run` loops over `runSession`. Each session gets its own `whatsmeow.Client` and `Ingester`. When WhatsApp sends `events.LoggedOut` (the device was removed on the phone, or the session was revoked), whatsmeow deletes the device from the session store. `runSession` then returns `relink = true`. The loop calls `GetFirstDevice` again, gets a fresh device, and `login` shows a new QR code. `events.StreamReplaced` (a second instance using the same session) ends the program with an error. The "Monitoring…" log line is written on `events.Connected`, so it only appears once the session is accepted.
-- **Shutdown.** On Ctrl+C or SIGTERM, the client disconnects first, then `Ingester.Stop` closes the queue and waits for the worker to finish what's left. Deferred calls run in reverse order: `Disconnect`, then `Stop`, then `store.Close`.
+- **Sessions and logout.** `run` loops over `runSession`. Each session gets its own `whatsmeow.Client` and `Ingester`. When WhatsApp sends `events.LoggedOut` (the device was removed on the phone, or the session was revoked), whatsmeow deletes the device from the session store. `runSession` then returns `relink = true`. The loop calls `GetFirstDevice` again, gets a fresh device, and `login` shows a new QR code. `events.StreamReplaced` (a second instance using the same session) ends the program with an error. The groups are looked up on the first `events.Connected` of a session; later ones (reconnects after a network drop) don't repeat it. If the lookup fails, for example because the community isn't found, the program exits with the error.
+- **Shutdown.** On Ctrl+C or SIGTERM, the client disconnects first, then `Ingester.Stop` closes the queue and waits for the worker to finish what's left. If the groups were never found, the queued events are discarded. Deferred calls run in reverse order: `Disconnect`, then `Stop`, then `store.Close`.
 
-### Contact matching (phone numbers vs LIDs)
+### Finding the groups
 
-WhatsApp is moving users from phone-number JIDs (`14125778174@s.whatsapp.net`) to opaque *LIDs* (`123456789@lid`). A message's sender can come in either form. `Ingester.targetSender` checks both `Info.Sender` and `Info.SenderAlt`, and resolves LIDs to phone numbers with `client.Store.LIDs.GetPNForLID`. whatsmeow fills that mapping as it sees traffic and history. If a message from the contact is missed, a missing LID mapping is the first thing to check.
+`findGroups` (groups.go) calls `client.GetJoinedGroups`, which returns every group you're in, with community links:
 
-`sender_jid` stores whatever WhatsApp sent, which may be a LID. `sender_phone` stores the resolved phone number.
+- A community is a group with `IsParent`. Its groups have `LinkedParentJID` set to the community's JID.
+- The community's announcement group has `IsDefaultSubGroup`. Its own name is usually the community's name, but WhatsApp shows it as "Announcements", so `selectGroups` names it `Announcements` for matching and storage.
+- If a community isn't in the list itself, `findGroups` looks it up with `GetGroupInfo`, so it can still be found by name.
 
-### Direct chats only
+`selectGroups` is the pure part, and is what the tests cover. It finds the community by name (or by JID, if `-community` is one), then matches the names in `groups.txt` against the community's groups. Names are compared without case and with runs of whitespace collapsed (`nameKey`). Groups with the same name in other communities are never matched. Listed names that weren't found, and community groups that aren't listed, are returned so `findGroups` can log them.
 
-`isDirectChat` accepts a chat only if its JID is on the user server (`@s.whatsapp.net`) or the LID server (`@lid`). That excludes groups (`@g.us`), status updates and broadcast lists (`@broadcast`), and newsletters. `enqueue` also checks `Info.IsGroup`, and history sync skips whole non-direct conversations before parsing them.
+Each selected group is recorded with `Store.SaveGroup`, which also assigns its media folder (below). `GetJoinedGroups` also stores the phone number behind each participant's LID, which helps with naming senders.
 
-### The `sender` column
+Groups are matched by name only at startup. A rename while running arrives as `events.GroupInfo` with `Name` set; `updateGroup` records the new name and keeps the group, and its folder. The announcement group's name is never updated.
 
-`sender` holds the monitored contact's configured name (`-contact-name`); see [DATABASE.md](DATABASE.md#messages). To monitor more than one contact later, replace `targetPhone`/`targetName` with a phone→name map and have `targetSender` return the matching name.
+### Media folders
+
+Each group's files go in their own folder of the media dir. `mediaFolderName` makes the folder name from the group name, replacing `/ \ : * ? " < > |` and control characters, and trimming leading and trailing dots and spaces. `Store.SaveGroup` uses that name for a group it hasn't seen, adding ` (2)`, ` (3)`, … if another group already has the folder. `chat_groups.media_folder` compares without case, because the macOS file system does. An existing group keeps its folder, so renaming a group doesn't split its files. `mediaRelPath` builds `<folder>/<UTC time>_<message id><ext>`, which is what `message_media_files.relative_path` stores.
+
+### Senders (phone numbers vs LIDs)
+
+WhatsApp is moving users from phone-number JIDs (`14125778174@s.whatsapp.net`) to opaque *LIDs* (`123456789@lid`), and many groups address members by LID. `Ingester.senderPhone` checks both `Info.Sender` and `Info.SenderAlt`, and resolves LIDs to phone numbers with `client.Store.LIDs.GetPNForLID`. whatsmeow fills that mapping as it sees traffic, history and group participant lists.
+
+`sender_jid` stores whatever WhatsApp sent, which may be a LID. `sender_phone` stores the resolved phone number, if any.
+
+`senderLabel` fills `sender` the way WhatsApp labels people in a group: your saved contact name (`FullName`, then `FirstName`, from whatsmeow's contact store, which is synced from your phone), otherwise their own display name (`PushName`), otherwise `+<phone>`. For your own messages it falls back to your own display name. `sender_name` keeps the display name alone; see [DATABASE.md](DATABASE.md#messages).
+
+### Groups only
+
+`HandleEvent` only queues messages whose chat is on the group server (`@g.us`). That excludes direct chats, status updates and broadcast lists (`@broadcast`), and newsletters. History sync skips whole conversations that aren't monitored groups, and skips entries with no message content (notices such as "… joined").
 
 ### Message classification
 
@@ -74,12 +96,18 @@ go vet ./...
 gofmt -l .                          # should print nothing
 ```
 
-`db/db_test.go` covers how albums are stored as one message (including items arriving before the album message, and duplicates) and the legacy media migration. `Ingester.process` isn't tested yet. The next step would be to give it an `events.Message` built from a `waE2E.Message` literal, run it against a temp SQLite store, and use a fake downloader.
+The tests don't need a WhatsApp connection:
 
-To test by hand, link a device with a separate `-data-dir` so the real session is left alone. Then have the contact (or yourself, temporarily using `-contact-phone` with a second account's number) send a text, an image, an album of 2–3 images, a voice note, a document, a reply, and an edit:
+- `groups_test.go` covers reading `groups.txt`, picking the community and its groups (`selectGroups`) and folder names.
+- `ingest_test.go` runs the `Ingester` with a real `whatsmeow.Client` that never connects, backed by temporary session and message databases. It sends live messages, a history sync and a rename through `HandleEvent`, before and after `SetGroups`, and checks the rows: which groups are kept, sender names and phone numbers (including a LID), your own messages, and an album item whose download fails.
+- `db/db_test.go` covers albums, `SaveGroup` folders, `BackfillSender` and the legacy media migration.
+
+Successful media downloads aren't tested, because they need WhatsApp's servers. `mediaRelPath` covers where the files go.
+
+To test by hand, link a device with a separate `-data-dir` so the real session is left alone. Then send a text, an image, an album of 2–3 images, a voice note, a document, a reply and an edit in one of the listed groups (a test group of your own works, if you add it to a copy of `groups.txt`), and check that a message in an unlisted group isn't recorded:
 
 ```bash
-./run.sh -data-dir ./data-dev -media-dir /tmp/seth-images -log-level DEBUG
+./run.sh -data-dir ./data-dev -media-dir /tmp/seth-media -groups-file groups-dev.txt -log-level DEBUG
 ```
 
 ## Dependencies
@@ -101,3 +129,4 @@ go get go.mau.fi/whatsmeow@latest && go mod tidy && go build ./...
 - This is an unofficial client. WhatsApp may rate-limit or ban accounts that behave unusually. Passive reading like this is low risk, but avoid running several linked instances at once.
 - A linked device is logged out if the phone doesn't come online for about 14 days.
 - History sync is best-effort. How much history arrives, and whether its media can still be downloaded, is up to WhatsApp.
+- Edits that arrive in history sync are a known gap. whatsmeow's `ParseWebMessage` gives them the ID and content of the message they edit, so they aren't stored as `edit` rows: if the original is already stored, the edit is treated as a repeat of it and dropped; otherwise it's stored as the original, with the edited text. Live edits are stored as `edit` rows.
