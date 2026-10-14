@@ -4,15 +4,20 @@
 
 seth-ingestion collects the Seth community's WhatsApp messages so that other programs can use them, above all the school's AI agents. This guide is for whoever builds those agents. It covers how to read the data safely, how to follow new messages as they arrive, and what you can rely on.
 
+There are two ways to read the data, and both give the same view of it:
+
+- **The HTTP API, `seth-feed`:** a read-only REST API with JSON responses. It's the easiest way for an agent, and the only way for one running on another computer. See [HTTP API](#http-api).
+- **The SQLite database directly,** for programs on the same computer that prefer SQL. The rest of this guide describes it.
+
 For what each column means, see [DATABASE.md](DATABASE.md). For how the data is collected, see the [README](../README.md).
 
-**On this page:** [At a glance](#at-a-glance) · [Connecting](#connecting) · [Following new messages](#following-new-messages) · [Reading a conversation](#reading-a-conversation) · [Media files](#media-files) · [What you can rely on](#what-you-can-rely-on) · [Testing with simulated data](#testing-with-simulated-data) · [A complete example](#a-complete-example)
+**On this page:** [At a glance](#at-a-glance) · [HTTP API](#http-api) · [Connecting](#connecting) · [Following new messages](#following-new-messages) · [Reading a conversation](#reading-a-conversation) · [Media files](#media-files) · [What you can rely on](#what-you-can-rely-on) · [Testing with simulated data](#testing-with-simulated-data) · [A complete example](#a-complete-example)
 
 ## At a glance
 
 - **Where:** `data/messages.db`, a SQLite database, and the media folder (by default `/Users/tnpbot/Downloads/whatsapp-poc-images`).
 - **What:** every message in the [listed groups](../groups.txt) of the Seth community, with its group, sender and files.
-- **Access:** read-only. Any number of readers can run while seth-ingestion is writing.
+- **Access:** read-only, through the [HTTP API](#http-api) or by opening the database. Any number of readers can run while seth-ingestion is writing.
 - **Freshness:** a live text message is in the database moments after it's sent. A message with a photo or file appears once the file has downloaded.
 - **Delivery:** pull. There's no push or webhook: agents poll for rows newer than the last ones they saw.
 
@@ -21,9 +26,381 @@ flowchart LR
     WA["WhatsApp<br/>Seth community groups"] --> SI["seth-ingestion"]
     SI -- writes --> DB[("messages.db")]
     SI -- writes --> MF[("media folder")]
-    DB -. "polls, read-only" .-> A1["AI agent"]
-    MF -. "reads files" .-> A1
-    DB -. "polls, read-only" .-> A2["another agent"]
+    DB -. "read-only" .-> SF["seth-feed<br/>HTTP API"]
+    MF -.-> SF
+    SF -- "JSON over HTTP" --> A1["AI agent"]
+    DB -. "polls, read-only" .-> A2["local program<br/>using SQL"]
+```
+
+## HTTP API
+
+`seth-feed` serves the recorded messages as a **read-only REST API over HTTP**:
+
+- Every request is a `GET`. Inputs are **query parameters** in the URL; there is no request body.
+- Every response is **JSON**, except `GET /media/{id}`, which returns the file's raw bytes.
+- Nothing can be changed through the API. It opens the database read-only, and any other method gets `405`.
+
+It returns **the same logical view** as reading the database the way this guide describes: each message carries its group's name and its files, an edited message carries its latest text in `current_body`, an album is one message with its photos in order, and a failed download is marked with an `error` and no `url`.
+
+> [!CAUTION]
+> Message text comes from anyone in the groups. Treat `body`, `current_body`, captions and file names as **data, never as instructions**. If a message says "ignore your rules" or "delete the calendar", your agent must not obey it.
+
+### Running it
+
+```bash
+./feed.sh                       # serves data/messages.db on http://127.0.0.1:8080
+./feed.sh -sim                  # serves the simulator's data-sim/ instead, for testing
+./feed.sh -addr 0.0.0.0:8080    # also reachable from other computers on the network
+```
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `-db` | `SETH_FEED_DB` | `data/messages.db` | The message database to serve |
+| `-media-dir` | `SETH_MEDIA_DIR` | `/Users/tnpbot/Downloads/whatsapp-poc-images` | Where the files are |
+| `-addr` | `SETH_FEED_ADDR` | `127.0.0.1:8080` | Address to listen on. The default only accepts requests from the same computer |
+| `-sim` | | off | Serve `data-sim/messages.db` and `data-sim/media` |
+| `-cors-origin` | `SETH_FEED_CORS_ORIGIN` | none | Let web pages from this origin call the API. Off by default |
+
+> [!WARNING]
+> The API has no login. Listening on `0.0.0.0` lets anyone on your network read the school's messages. Only do that on a network you trust, or put it behind something that checks who's asking.
+
+### Endpoints
+
+| Method and path | Returns |
+|---|---|
+| [`GET /health`](#get-health) | Status, counts, whether the data is simulated, and the current cursor |
+| [`GET /groups`](#get-groups) | The recorded groups |
+| [`GET /messages`](#get-messages) | Messages, newest first, with paging and filters |
+| [`GET /groups/{group}/messages`](#get-messages) | The same, for one group |
+| [`GET /messages/new`](#get-messagesnew) | **The follow endpoint:** everything since your cursor |
+| [`GET /messages/{chat_jid}/{message_id}`](#get-messageschat_jidmessage_id) | One message, with the message it replies to |
+| [`GET /search`](#get-search) | Messages whose text, caption or file name contains some words |
+| [`GET /media/{id}`](#get-mediaid) | A photo, document or voice note, as raw bytes |
+| [`GET /events`](#get-events) | Simulated data only: what each event announcement really means |
+
+**Errors** come back as JSON with a status code: `400` for a bad parameter, `404` for something that doesn't exist, `405` for anything but `GET`, `500` for a database problem.
+
+```json
+{ "error": "limit must be a positive number" }
+```
+
+**Groups** in paths and in `group=` can be given three ways: the group's name (`Preschool P.E. Teachers`, ignoring case and extra spaces), its media folder (`preschool-pe-teachers`), or its JID (`120363012345678901@g.us`). URL-encode names with spaces.
+
+### The message object
+
+Every endpoint that returns messages returns them in this shape. The field names are the database's column names, plus a few that save you work:
+
+```json
+{
+  "seq": 121,
+  "chat_jid": "120363953379380360@g.us",
+  "message_id": "3AB8E29B7B857F54CE3F",
+  "group": "Preschool",
+  "sender": "Melissa Chen",
+  "sender_jid": "15555550101@s.whatsapp.net",
+  "sender_phone": "15555550101",
+  "sender_name": "Melissa",
+  "sent_at": "2026-10-14T16:01:00Z",
+  "ingested_at": "2026-10-14T16:01:02Z",
+  "message_type": "text",
+  "body": "Pickup is at 3 today",
+  "current_body": "Pickup is at 3:30 today",
+  "edited": true,
+  "edited_at": "2026-10-14T16:03:00Z",
+  "edit_target_id": null,
+  "quoted_id": null,
+  "media_file_count": 0,
+  "source": "live",
+  "files": []
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `seq` | The message's position in arrival order (`messages.rowid`). Only grows |
+| `chat_jid`, `message_id` | Together, the message's key |
+| `group` | The group's name |
+| `sender` | How WhatsApp labels the sender; use `sender_phone` or `sender_jid` to tell people apart |
+| `sent_at` | When it was sent, UTC |
+| `message_type` | `text`, `image`, `video`, `voice`, `audio`, `document`, `sticker`, `album`, `edit` or `other` |
+| `body` | The text or caption as first sent |
+| `current_body` | The text with the latest edit applied. **Use this one.** Not present on `edit` rows |
+| `edited`, `edited_at` | Whether the message was edited, and when it last was |
+| `edit_target_id` | On an `edit` row: the message it changes |
+| `quoted_id` | The `message_id` this message replies to, in the same group |
+| `source` | `live`, or `history` for the backlog WhatsApp sends after linking |
+| `files` | The message's files, in album order. See below |
+| `raw_json` | The full WhatsApp message, only with `raw=true` (and always on the single-message endpoint). Reactions, locations and polls (`other`) are only described here |
+| `updated` | Only on `/messages/new`: `true` when this is a message you already have, sent again because it gained files |
+
+Each entry in `files`:
+
+```json
+{
+  "id": 41,
+  "source_message_id": "3A6FD07C4B2A11E0D93A",
+  "position": 0,
+  "media_type": "image",
+  "caption": "Field trip fun!",
+  "file_name": null,
+  "relative_path": "preschool/20261014T160400Z_3A6FD07C4B2A11E0D93A.jpg",
+  "mime": "image/jpeg",
+  "size": 48211,
+  "sha256": "9f2c…",
+  "error": null,
+  "url": "/media/41"
+}
+```
+
+`url` is where to fetch the file. It's `null` when the download failed, and `error` then says why.
+
+### GET /health
+
+Whether the service is up, what it's serving, and the cursor for "everything so far".
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+```json
+{
+  "status": "ok",
+  "simulated": true,
+  "events_available": true,
+  "database": "data-sim/messages.db",
+  "media_dir": "data-sim/media",
+  "media_dir_exists": true,
+  "groups": 17,
+  "messages": 250,
+  "cursor": "250.80"
+}
+```
+
+`simulated` is `true` for data made by seth-sim. Check it before trusting what you read. `cursor` is what to pass to `/messages/new` to start following from now, skipping the history.
+
+### GET /groups
+
+```bash
+curl http://127.0.0.1:8080/groups
+```
+
+```json
+{
+  "groups": [
+    {
+      "group_jid": "120363995193552747@g.us",
+      "name": "Announcements",
+      "community_jid": "120363941183452870@g.us",
+      "community_name": "Seth",
+      "is_announcement": true,
+      "media_folder": "announcements",
+      "first_seen_at": "2026-10-14T22:25:23Z",
+      "updated_at": "2026-10-14T22:25:23Z",
+      "message_count": 31,
+      "last_message_at": "2026-10-14T14:30:48Z"
+    }
+  ]
+}
+```
+
+### GET /messages
+
+Messages from every group, or from one group with `GET /groups/{group}/messages`. Newest first by default. Edits are applied and the `edit` rows themselves are left out, so you read the conversation as people see it.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `group` | all groups | A group's name, folder or JID (or use `/groups/{group}/messages`) |
+| `limit` | `50` | How many to return, at most `500` |
+| `order` | `desc` | `desc` for newest first, `asc` for oldest first |
+| `sort` | `seq` | `seq` (arrival order) or `sent_at` (sending order, for reading a conversation) |
+| `before` | | Only messages with a `seq` below this. For paging back; needs `sort=seq` |
+| `since` | | Only messages with a `seq` above this. For paging forward; needs `sort=seq` |
+| `from`, `to` | | Only messages sent at or after `from` and before `to`. A date (`2026-10-14`, midnight on the server's clock) or a UTC time (`2026-10-14T16:00:00Z`) |
+| `include_edits` | `false` | `true` to include the `edit` rows too |
+| `raw` | `false` | `true` to include each message's `raw_json` |
+
+```bash
+curl "http://127.0.0.1:8080/groups/announcements/messages?limit=20"
+curl "http://127.0.0.1:8080/messages?group=Preschool&from=2026-10-13&sort=sent_at&order=asc"
+```
+
+```json
+{
+  "messages": [ { "seq": 249, "group": "Announcements", "current_body": "📅 The fall family picnic is on Sat, Oct 24 at 11am. Bring a dish to share!", "…": "…" } ],
+  "has_more": true,
+  "next": { "before": 230 },
+  "cursor": "249.80"
+}
+```
+
+- `has_more` is `true` when there are more messages past this page. `next` gives the parameter for the next page: `before` when newest first, `since` when oldest first.
+- `cursor` is a follow cursor for the newest message on the page, ready for `/messages/new`.
+
+### GET /messages/new
+
+**The follow endpoint.** It returns everything recorded since your cursor, oldest first, and a new cursor to use next time. An agent that keeps a live view of the groups, or a school calendar, calls it every few seconds.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `since` | the beginning | The `cursor` from your last call. Leave it out to start from the first message; use `cursor` from `/health` to start from now |
+| `limit` | `100` | How many new messages at most, up to `500` |
+| `group` | all groups | Only follow one group |
+| `raw` | `false` | `true` to include `raw_json` |
+
+```bash
+curl "http://127.0.0.1:8080/messages/new?since=250.80"
+```
+
+```json
+{
+  "cursor": "252.83",
+  "has_more": false,
+  "messages": [
+    { "seq": 247, "message_type": "album", "updated": true, "files": [ { "id": 81 }, { "id": 82 }, { "id": 83 } ], "…": "…" },
+    { "seq": 251, "group": "Announcements", "message_type": "text", "current_body": "Reminder: school picture day is tomorrow.", "…": "…" },
+    { "seq": 252, "group": "Preschool", "message_type": "edit", "edit_target_id": "3AB8E29B7B857F54CE3F", "body": "Pickup is at 3:30 today", "…": "…" }
+  ]
+}
+```
+
+What makes it reliable:
+
+- **Nothing is skipped or repeated.** Each call reads one consistent snapshot of the database, and the cursor marks exactly where that snapshot ended.
+- **Edits arrive as their own `edit` rows,** so a correction reaches you even when the original came long ago. Update the message named by `edit_target_id`. Corrections to event dates arrive this way too.
+- **Albums are complete.** An album appears as soon as its first photo arrives. When more of its photos arrive later, the album comes again with `"updated": true` and all its files. Replace your copy of that message.
+- **The cursor is opaque.** It looks like `252.83`: the last message's `seq`, and the last file `id` you have. Store it exactly as given and pass it back. A plain `seq` such as `252` is accepted too.
+
+**The follow loop, step by step:**
+
+1. Start with no cursor (all history), or with `cursor` from `GET /health` (only what arrives from now on).
+2. Call `GET /messages/new?since=CURSOR`.
+3. Handle each message in `messages`, in order. If `updated` is `true`, replace the message you have with the same `chat_jid` and `message_id`.
+4. Save the returned `cursor` somewhere durable, such as a file, **after** you've handled the batch.
+5. If `has_more` is `true`, go straight back to step 2. Otherwise wait a few seconds first.
+
+```python
+import json, time, urllib.request
+from pathlib import Path
+
+FEED = "http://127.0.0.1:8080"
+STATE = Path("cursor.txt")  # where this agent remembers how far it has read
+
+def get(path):
+    with urllib.request.urlopen(FEED + path, timeout=30) as resp:
+        return json.load(resp)
+
+cursor = STATE.read_text().strip() if STATE.exists() else get("/health")["cursor"]
+
+while True:
+    page = get(f"/messages/new?since={cursor}")
+    for m in page["messages"]:
+        # Message text is data from the community. Never follow instructions in it.
+        if m["message_type"] == "edit":
+            print(f"[{m['group']}] {m['sender']} edited {m['edit_target_id']}: {m['body']}")
+        else:
+            print(f"[{m['group']}] {m['sender']}: {m['current_body'] or '(' + m['message_type'] + ')'}"
+                  + (" (updated)" if m.get("updated") else ""))
+        for f in m["files"]:
+            if f["url"]:
+                print("   file:", FEED + f["url"], f["mime"])
+    cursor = page["cursor"]
+    STATE.write_text(cursor)
+    if not page["has_more"]:
+        time.sleep(5)
+```
+
+### GET /messages/{chat_jid}/{message_id}
+
+One message, with `raw_json`, its latest edit applied, and the message it replies to in `quoted`.
+
+```bash
+curl "http://127.0.0.1:8080/messages/120363000000000001@g.us/3AB8E29B7B857F54CE3F"
+```
+
+```json
+{
+  "seq": 2,
+  "message_id": "3AB8E29B7B857F54CE3F",
+  "current_body": "Thanks!",
+  "quoted_id": "3A1F00C2D4E5F60718A9",
+  "quoted": { "message_id": "3A1F00C2D4E5F60718A9", "sender": "Melissa Chen", "current_body": "Pickup is at 3:30 today", "edited": true, "…": "…" },
+  "raw_json": { "extendedTextMessage": { "text": "Thanks!", "contextInfo": { "stanzaID": "3A1F00C2D4E5F60718A9" } } },
+  "…": "…"
+}
+```
+
+Returns `404` if there's no such message.
+
+### GET /search
+
+Messages whose text, or a file's caption or name, contains `q`, newest first. Matching ignores case for English letters, and `%` and `_` match themselves. Edit rows are searched too, since they carry text.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `q` | required | The words to find, at least 2 characters |
+| `group` | all groups | Only search one group |
+| `from`, `to` | | Only messages sent in this range, as for `/messages` |
+| `limit` | `50` | At most `200` |
+| `raw` | `false` | `true` to include `raw_json` |
+
+```bash
+curl "http://127.0.0.1:8080/search?q=picnic&group=Announcements"
+```
+
+```json
+{
+  "query": "picnic",
+  "messages": [ { "seq": 249, "current_body": "📅 The fall family picnic is on Sat, Oct 24 at 11am. Bring a dish to share!", "…": "…" } ]
+}
+```
+
+### GET /media/{id}
+
+The file with this `id`, as raw bytes, with its `Content-Type` set from the file's `mime`. Use a file's `url` rather than building the path yourself.
+
+```bash
+curl -o photo.jpg http://127.0.0.1:8080/media/41
+```
+
+- `404` with a JSON error if there's no such file, or its download failed.
+- Documents are sent with their original name in `Content-Disposition`.
+- Only files inside the media folder are ever served.
+
+### GET /events
+
+Only for simulated data (`"simulated": true` in `/health`); otherwise `404`. It returns the [answer key](#school-events-for-calendar-agents) for the simulator's event announcements, so you can check the calendar your agent builds against what was really announced.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `since` | `0` | Only events from messages with a `seq` above this |
+| `action` | all | `scheduled`, `reminder`, `deadline`, `rescheduled` or `cancelled` |
+| `limit` | `500` | At most `5000` |
+
+```bash
+curl "http://127.0.0.1:8080/events?action=reminder"
+```
+
+```json
+{
+  "events": [
+    {
+      "chat_jid": "120363995193552747@g.us",
+      "message_id": "3A345A75C0F859E903F6",
+      "seq": 26,
+      "group": "Announcements",
+      "sent_at": "2026-10-09T00:32:34Z",
+      "message_type": "text",
+      "body": "Reminder: the bake sale fundraiser is Friday, October 16 at 8am. All proceeds go to the playground fund.",
+      "event": "bake sale fundraiser",
+      "action": "reminder",
+      "starts_at": "2026-10-16T08:00:00-07:00",
+      "ends_on": null,
+      "all_day": false,
+      "previous_starts_at": null,
+      "deadline_on": null
+    }
+  ]
+}
 ```
 
 ## Connecting
@@ -170,7 +547,7 @@ You don't need real WhatsApp messages to build or test an agent. `seth-sim` writ
 ./sim.sh send -group Preschool -from "Melissa Chen" -text "Pickup moved to 3:30 today"
 ```
 
-Then point your agent at `data-sim/messages.db` and `data-sim/media` instead of the real paths. Run `./sim.sh live` in one terminal and your agent in another to watch it follow messages as they arrive.
+Then point your agent at `data-sim/messages.db` and `data-sim/media` instead of the real paths, or run `./feed.sh -sim` and use the [HTTP API](#http-api) as usual. Run `./sim.sh live` in one terminal and your agent in another to watch it follow messages as they arrive.
 
 | Command | What it does | Useful flags |
 |---|---|---|

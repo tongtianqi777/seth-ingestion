@@ -129,7 +129,19 @@ sqlite3 -readonly -header -column data/messages.db \
 
 ## For AI agents
 
-The data is collected so that agents can use it. An agent opens the database read-only, alongside the running program, and polls for rows it hasn't seen yet:
+The data is collected so that agents can use it, in one of two ways.
+
+**Over HTTP, with `seth-feed`.** A read-only REST API with JSON responses, for agents on this computer or elsewhere:
+
+```bash
+./feed.sh                                             # serves on http://127.0.0.1:8080
+curl "http://127.0.0.1:8080/messages/new?since=0"     # everything so far, plus a cursor
+curl "http://127.0.0.1:8080/messages/new?since=250.80"  # only what's new since that cursor
+```
+
+An agent calls `/messages/new` every few seconds with the `cursor` from its last call, and gets each new message exactly once, with edits applied and album photos complete. See [HTTP API](docs/CONSUMING.md#http-api) for every endpoint.
+
+**Directly from SQLite.** A program on the same computer can open the database read-only, alongside the running program, and poll for rows it hasn't seen yet:
 
 ```python
 import sqlite3
@@ -195,7 +207,7 @@ Newer WhatsApp groups can identify people by a hidden ID instead of their phone 
 
 | Guide | Read it to… |
 |---|---|
-| [CONSUMING.md](docs/CONSUMING.md) | build an AI agent or other program that reads the data, and test it with simulated messages |
+| [CONSUMING.md](docs/CONSUMING.md) | build an AI agent or other program that reads the data, over the HTTP API or from SQLite, and test it with simulated messages |
 | [DATABASE.md](docs/DATABASE.md) | look up a table or column, or see how albums, edits and upgrades work |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | understand how the program works, change it, and test it |
 

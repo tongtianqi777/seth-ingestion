@@ -7,7 +7,7 @@ The reference for everything seth-ingestion stores: the tables and their columns
 **On this page:** [Overview](#overview) · [Conventions](#conventions) · [Tables](#tables) · [Message types](#message-types) · [Albums](#albums) · [Write rules](#write-rules) · [Media files on disk](#media-files-on-disk) · [Example queries](#example-queries) · [Upgrades](#schema-creation-and-upgrades)
 
 > [!TIP]
-> Building an AI agent that reads this data? Start with [CONSUMING.md](CONSUMING.md). It shows how to follow new messages and what you can rely on, and links back here for the details.
+> Building an AI agent that reads this data? Start with [CONSUMING.md](CONSUMING.md). It covers the `seth-feed` HTTP API, how to follow new messages and what you can rely on, and links back here for the details.
 
 The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in [db/db.go](../db/db.go) and `Ingester.process` in [ingest.go](../ingest.go). For setup, see the [README](../README.md); for the rest of the code, the [development guide](DEVELOPMENT.md).
 
