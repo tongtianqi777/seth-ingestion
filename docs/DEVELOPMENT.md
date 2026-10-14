@@ -19,7 +19,8 @@ How seth-ingestion works inside, and how to change and test it. For setup and us
 | `*_test.go`, `db/db_test.go` | Tests. See [Building and checking](#building-and-checking) |
 | `internal/grouplist/` | The groups-file format and the folder-name rule, shared by both programs |
 | `cmd/seth-sim/` | The simulator, which writes invented group traffic to `data-sim/` for testing clients. See [CONSUMING.md](CONSUMING.md#testing-with-simulated-data) |
-| `run.sh`, `sim.sh` | Entry scripts: rebuild when sources change, then run `bin/seth-ingestion` or `bin/seth-sim` |
+| `cmd/seth-feed/` | The read-only HTTP API for agents. See [CONSUMING.md](CONSUMING.md#http-api) |
+| `run.sh`, `sim.sh`, `feed.sh` | Entry scripts: rebuild when sources change, then run `bin/seth-ingestion`, `bin/seth-sim` or `bin/seth-feed` |
 | `docs/` | These guides, and the logo in `docs/assets/` |
 | `data-sim/` | The simulator's database and media, ignored by git |
 | `data/` | Runtime state, ignored by git: `messages.db` (the recorded messages) and `whatsmeow-session.db` (the linked device's keys and session, managed by whatsmeow) |
@@ -112,6 +113,14 @@ The tests don't need a WhatsApp connection:
 - `db/db_test.go` covers albums, `SaveGroup` folders, `BackfillSender` and the legacy media migration.
 - `internal/grouplist` tests cover reading `groups.txt` and folder names.
 - `cmd/seth-sim` tests check that simulated data is consistent (albums complete, replies and edits point at real messages, files exist where `relative_path` says), that a seed repeats exactly, and that the simulator refuses to write to a real database.
+
+- `cmd/seth-feed` tests build a database with the `db` package, serve it with `httptest`, and check every endpoint: paging, the follow cursor (including an album photo that arrives after its message was read), edits applied and replies resolved, search, media bytes and content types, failed downloads, path traversal, `/events` only on simulated data, and that the connection can't write.
+
+### The HTTP API
+
+`seth-feed` opens the database with `mode=ro` and only runs `SELECT`s, through the standard library's `net/http` and the same SQLite driver. It reads the tables directly rather than going through `db.Store`, which is for writing. Queries live in `cmd/seth-feed/store.go` and handlers in `server.go`.
+
+The follow cursor `SEQ.FILE` is the last message's `rowid` and the highest file `id` among messages up to it. `/messages/new` reads both parts of each response in one transaction, so a message or file written in between is never skipped. When you add a column, add it to `Message` or `File` and to `messageColumns`, and keep the field name the same as the column. Agents rely on the field names, so treat renaming one like renaming a column.
 
 ### The simulator
 
