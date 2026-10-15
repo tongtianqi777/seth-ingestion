@@ -19,7 +19,8 @@ type Metrics struct {
 	Messages        int            `json:"messages"`          // all messages in the recorded groups
 	MessagesLast24h int            `json:"messages_last_24h"` // sent in the last 24 hours
 	MediaFiles      int            `json:"media_files"`       // photos, videos, voice notes, documents…
-	MediaFailed     int            `json:"media_failed"`      // of those, downloads that failed
+	MediaFailed     int            `json:"media_failed"`      // of those, downloads that failed for any other reason
+	MediaExpired    int            `json:"media_expired"`     // of those, files WhatsApp no longer keeps
 	MediaBytes      int64          `json:"media_bytes"`       // total size of the saved files
 	NewestSentAt    *string        `json:"newest_sent_at"`    // the most recent message's sent_at
 	LastIngestedAt  *string        `json:"last_ingested_at"`  // when the last message was written
@@ -36,8 +37,22 @@ type GroupMetrics struct {
 	Messages       int     `json:"messages"`
 	MediaFiles     int     `json:"media_files"`
 	MediaFailed    int     `json:"media_failed"`
+	MediaExpired   int     `json:"media_expired"`
 	LastMessageAt  *string `json:"last_message_at"`
 }
+
+// SQL conditions on message_media_files rows without a saved file. WhatsApp
+// answers 403, 404 or 410 for media it no longer keeps, which is normal for
+// older history, so those are counted as expired rather than failed. The error
+// text is whatsmeow's "download failed with status code N", stored by ingest.go.
+const (
+	isExpiredSQL = `f.error IN (
+		'download failed with status code 403',
+		'download failed with status code 404',
+		'download failed with status code 410')`
+	expiredSQL = `f.relative_path IS NULL AND ` + isExpiredSQL
+	failedSQL  = `f.relative_path IS NULL AND NOT COALESCE(` + isExpiredSQL + `, 0)`
+)
 
 // readMetrics opens the database read-only, runs a few short queries in one
 // read transaction (one consistent snapshot), and closes it again.
@@ -66,16 +81,17 @@ func readMetrics(ctx context.Context, path string) (Metrics, error) {
 		return m, err
 	}
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(f.relative_path IS NULL), 0), COALESCE(SUM(f.size), 0)
+		SELECT COUNT(*), COALESCE(SUM(`+failedSQL+`), 0), COALESCE(SUM(`+expiredSQL+`), 0), COALESCE(SUM(f.size), 0)
 		FROM message_media_files f JOIN chat_groups g ON g.group_jid = f.chat_jid`).
-		Scan(&m.MediaFiles, &m.MediaFailed, &m.MediaBytes); err != nil {
+		Scan(&m.MediaFiles, &m.MediaFailed, &m.MediaExpired, &m.MediaBytes); err != nil {
 		return m, err
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT g.group_jid, g.name, g.is_announcement,
 		       (SELECT COUNT(*) FROM messages m WHERE m.chat_jid = g.group_jid),
 		       (SELECT COUNT(*) FROM message_media_files f WHERE f.chat_jid = g.group_jid),
-		       (SELECT COUNT(*) FROM message_media_files f WHERE f.chat_jid = g.group_jid AND f.relative_path IS NULL),
+		       (SELECT COUNT(*) FROM message_media_files f WHERE f.chat_jid = g.group_jid AND `+failedSQL+`),
+		       (SELECT COUNT(*) FROM message_media_files f WHERE f.chat_jid = g.group_jid AND `+expiredSQL+`),
 		       (SELECT MAX(sent_at) FROM messages m WHERE m.chat_jid = g.group_jid)
 		FROM chat_groups g
 		ORDER BY g.is_announcement DESC, g.name`)
@@ -85,7 +101,7 @@ func readMetrics(ctx context.Context, path string) (Metrics, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var g GroupMetrics
-		if err := rows.Scan(&g.GroupJID, &g.Name, &g.IsAnnouncement, &g.Messages, &g.MediaFiles, &g.MediaFailed, &g.LastMessageAt); err != nil {
+		if err := rows.Scan(&g.GroupJID, &g.Name, &g.IsAnnouncement, &g.Messages, &g.MediaFiles, &g.MediaFailed, &g.MediaExpired, &g.LastMessageAt); err != nil {
 			return m, err
 		}
 		m.Groups = append(m.Groups, g)

@@ -171,7 +171,7 @@
       </div>
       <table class="groups">
         <caption class="sr">Messages and media files per group</caption>
-        <thead><tr><th scope="col">Group</th><th scope="col" class="num">Messages</th><th scope="col" class="num">Files</th><th scope="col" class="num">Failed</th><th scope="col" class="hide-sm">Last message</th></tr></thead>
+        <thead><tr><th scope="col">Group</th><th scope="col" class="num">Messages</th><th scope="col" class="num">Files</th><th scope="col" class="num">Expired</th><th scope="col" class="num">Failed</th><th scope="col" class="hide-sm">Last message</th></tr></thead>
         <tbody id="m-groups"></tbody>
       </table>
       <p class="note" id="m-read"></p>
@@ -404,10 +404,11 @@ function renderMetrics(m) {
   $("m-messages").textContent = num(m.messages);
   $("m-24h").textContent = num(m.messages_last_24h) + " in the last 24 hours";
   $("m-media").textContent = num(m.media_files);
-  $("m-bytes").textContent = bytes(m.media_bytes) + " saved";
+  $("m-bytes").textContent = bytes(m.media_bytes) + " saved" + (m.media_expired ? " · " + num(m.media_expired) + " expired" : "");
+  $("m-bytes").title = m.media_expired ? "Expired files are older than WhatsApp keeps media. They can't be downloaded." : "";
   $("m-failed").textContent = num(m.media_failed);
   const pct = m.media_files ? Math.round(100 * m.media_failed / m.media_files) : 0;
-  $("m-failed-pct").textContent = m.media_failed ? pct + "% of files couldn't be downloaded" : "Every file downloaded";
+  $("m-failed-pct").textContent = m.media_failed ? pct + "% of files couldn't be downloaded" : "No unexpected failures";
   $("m-failed-pct").className = "extra" + (m.media_failed ? " warn" : "");
   $("m-newest").textContent = m.newest_sent_at ? ago(m.newest_sent_at) : "—";
   $("m-newest-at").textContent = m.newest_sent_at ? "Sent " + when(m.newest_sent_at) : "No messages yet";
@@ -433,6 +434,7 @@ function renderMetrics(m) {
     share.append(bar, n);
     count.append(share);
     tr.append(count, td(num(g.media_files), "num"));
+    tr.append(td(g.media_expired ? num(g.media_expired) : "–", "num"));
     tr.append(td(g.media_failed ? num(g.media_failed) : "–", "num" + (g.media_failed ? " failed" : "")));
     tr.append(td(g.last_message_at ? ago(g.last_message_at) : "No messages yet", "when hide-sm"));
     if (g.last_message_at) tr.lastChild.title = when(g.last_message_at);
