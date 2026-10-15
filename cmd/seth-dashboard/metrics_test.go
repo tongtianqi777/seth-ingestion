@@ -42,8 +42,9 @@ func writeDB(t *testing.T, dataDir string) {
 	save("1@g.us", "PHOTO", now.Add(-2*time.Hour), db.MediaFile{SourceMessageID: "PHOTO", MediaType: "image", RelativePath: "preschool/a.jpg", Size: 1500})
 	save("1@g.us", "ALBUM", now.Add(-time.Hour),
 		db.MediaFile{SourceMessageID: "A1", MediaType: "image", RelativePath: "preschool/b.jpg", Size: 500},
-		db.MediaFile{SourceMessageID: "A2", Position: 1, MediaType: "image", Error: "media expired"})
-	save("2@g.us", "NEWEST", now.Add(-time.Minute), db.MediaFile{SourceMessageID: "NEWEST", MediaType: "document", Error: "media expired"})
+		db.MediaFile{SourceMessageID: "A2", Position: 1, MediaType: "image", Error: "download failed with status code 403"},
+		db.MediaFile{SourceMessageID: "A3", Position: 2, MediaType: "image", Error: "download failed with status code 410"})
+	save("2@g.us", "NEWEST", now.Add(-time.Minute), db.MediaFile{SourceMessageID: "NEWEST", MediaType: "document", Error: "failed to write preschool/x.pdf: no space left on device"})
 	// A row from the earlier single-contact version: not in a recorded group, so not counted.
 	save("15555550101@s.whatsapp.net", "DM", now, db.MediaFile{SourceMessageID: "DM", MediaType: "image", RelativePath: "x.jpg", Size: 9})
 }
@@ -55,7 +56,7 @@ func TestReadMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !m.Available || m.Messages != 4 || m.MessagesLast24h != 3 || m.MediaFiles != 4 || m.MediaFailed != 2 || m.MediaBytes != 2000 {
+	if !m.Available || m.Messages != 4 || m.MessagesLast24h != 3 || m.MediaFiles != 5 || m.MediaFailed != 1 || m.MediaExpired != 2 || m.MediaBytes != 2000 {
 		t.Errorf("totals = %+v", m)
 	}
 	if m.NewestSentAt == nil || m.LastIngestedAt == nil {
@@ -65,16 +66,16 @@ func TestReadMetrics(t *testing.T) {
 		t.Errorf("newest_sent_at = %s, want the NEWEST message, not the DM", *m.NewestSentAt)
 	}
 	want := []GroupMetrics{
-		{GroupJID: "2@g.us", Name: "Announcements", IsAnnouncement: true, Messages: 1, MediaFiles: 1, MediaFailed: 1},
+		{GroupJID: "2@g.us", Name: "Announcements", IsAnnouncement: true, Messages: 1, MediaFiles: 1, MediaFailed: 1, MediaExpired: 0},
 		{GroupJID: "3@g.us", Name: "Acorn"},
-		{GroupJID: "1@g.us", Name: "Preschool", Messages: 3, MediaFiles: 3, MediaFailed: 1},
+		{GroupJID: "1@g.us", Name: "Preschool", Messages: 3, MediaFiles: 4, MediaFailed: 0, MediaExpired: 2},
 	}
 	if len(m.Groups) != len(want) {
 		t.Fatalf("groups = %+v", m.Groups)
 	}
 	for i, w := range want {
 		g := m.Groups[i]
-		if g.GroupJID != w.GroupJID || g.Name != w.Name || g.IsAnnouncement != w.IsAnnouncement || g.Messages != w.Messages || g.MediaFiles != w.MediaFiles || g.MediaFailed != w.MediaFailed {
+		if g.GroupJID != w.GroupJID || g.Name != w.Name || g.IsAnnouncement != w.IsAnnouncement || g.Messages != w.Messages || g.MediaFiles != w.MediaFiles || g.MediaFailed != w.MediaFailed || g.MediaExpired != w.MediaExpired {
 			t.Errorf("group %d = %+v, want %+v", i, g, w)
 		}
 		if (g.LastMessageAt == nil) != (w.Messages == 0) {
@@ -100,7 +101,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	code, body, _ = call(t, srv, "GET", "/api/metrics", "", false)
 	m = Metrics{}
 	json.Unmarshal(body, &m)
-	if code != 200 || !m.Available || m.Messages != 4 || m.MediaFailed != 2 || len(m.Groups) != 3 {
+	if code != 200 || !m.Available || m.Messages != 4 || m.MediaFailed != 1 || m.MediaExpired != 2 || len(m.Groups) != 3 {
 		t.Errorf("metrics: %d %s", code, body)
 	}
 
@@ -124,6 +125,11 @@ func TestMetricsWhileWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	base, err := readMetrics(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extraFiles := base.MediaFiles - base.Messages // the fixture has more files than messages
 	done := make(chan error, 1)
 	go func() {
 		for i := 0; i < 200; i++ {
@@ -144,8 +150,8 @@ func TestMetricsWhileWriting(t *testing.T) {
 				t.Fatal("writer:", err)
 			}
 			m, err := readMetrics(ctx, path)
-			if err != nil || m.Messages != 204 || m.MediaFiles != 204 {
-				t.Errorf("final metrics: %d messages, %d files, %v; want 204 each", m.Messages, m.MediaFiles, err)
+			if err != nil || m.Messages != 204 || m.MediaFiles != 204+extraFiles {
+				t.Errorf("final metrics: %d messages, %d files, %v; want 204 and %d", m.Messages, m.MediaFiles, err, 204+extraFiles)
 			}
 			return
 		default:
@@ -155,7 +161,7 @@ func TestMetricsWhileWriting(t *testing.T) {
 			t.Fatal("reader:", err)
 		}
 		// One snapshot per read: every message counted has its file counted.
-		if m.Messages < last || m.MediaFiles != m.Messages {
+		if m.Messages < last || m.MediaFiles != m.Messages+extraFiles {
 			t.Fatalf("inconsistent read: %d messages, %d files (previously %d)", m.Messages, m.MediaFiles, last)
 		}
 		last = m.Messages

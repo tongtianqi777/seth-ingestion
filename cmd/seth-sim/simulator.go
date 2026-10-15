@@ -304,7 +304,7 @@ func (s *simulator) emit(ctx context.Context, e event) error {
 			Mimetype: proto.String("image/jpeg"), Caption: optional(caption), Width: proto.Uint32(640), Height: proto.Uint32(480)}})
 		f := db.MediaFile{SourceMessageID: m.MessageID, MediaType: "image", Caption: caption, Mime: "image/jpeg"}
 		if e.kind.name == "failed" {
-			f.Error = "simulated: the file is no longer on WhatsApp's servers"
+			f.Error = "download failed with status code 410" // as for real expired media
 		} else if err := s.writeFile(g, m.MessageID, e.at, ".jpg", jpegImage(s.rng, g.Name), &f); err != nil {
 			return err
 		}

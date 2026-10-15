@@ -119,7 +119,7 @@ Press **Start** under **Data feed**. When it says **Serving**, agents can connec
 
 ### At a glance
 
-Below the controls, the **At a glance** panel shows how the ingestion is doing: messages and media files saved, failed downloads, the newest message, and a per-group breakdown. It reads the database directly (read-only), so it works even when everything is stopped.
+Below the controls, the **At a glance** panel shows how the ingestion is doing: messages and media files saved, expired files and failed downloads, the newest message, and a per-group breakdown. It reads the database directly (read-only), so it works even when everything is stopped.
 
 It also shows **storage**: how much disk the ingestion takes (the media folder plus the database and WhatsApp session) and how much space is left on this Mac, with a warning when free space runs low. Media piles up over time, so keep an eye on it. Sizes come from the files on disk and refresh every 30 seconds.
 
@@ -248,7 +248,7 @@ The error lists the communities that were found. Pass the right name with `-comm
 <details>
 <summary><strong><code>Failed to download …</code></strong></summary>
 
-WhatsApp keeps media on its servers for a limited time, so files in older history may have expired. The message and its file row are still saved, with the reason in the file row's `error` column.
+WhatsApp keeps media on its servers for a limited time, so files in older history may have expired (WhatsApp answers `status code 403`, `404` or `410`). The message and its file row are still saved, with the reason in the file row's `error` column. The dashboard counts these as **expired**, not failed; **Failed** is left for other problems, such as a full disk.
 </details>
 
 <details>
