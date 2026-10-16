@@ -364,8 +364,11 @@ func (s *Store) MediaFileExists(ctx context.Context, chatJID, sourceMessageID st
 //
 // If the message row already exists (a duplicate from history sync, or an
 // album whose row was created by an earlier item), it is kept, and only
-// missing body/raw_json values and an earlier sent_at are filled in. New
-// media files are added either way, and media_file_count is recomputed.
+// missing body/mentions/raw_json values and an earlier sent_at are filled in.
+// The exception is a row stored as 'other' that now arrives as something
+// else: it was made from an event that carried none of the message (such as a
+// key exchange), so the real message takes it over. New media files are added
+// either way, and media_file_count is recomputed.
 func (s *Store) Save(ctx context.Context, m *Message, atts []MediaFile) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -391,6 +394,21 @@ func (s *Store) Save(ctx context.Context, m *Message, atts []MediaFile) (bool, e
 	n, _ := res.RowsAffected()
 	isNew := n > 0
 	if !isNew {
+		if m.MessageType != "other" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE messages SET
+					message_type   = ?,
+					body           = COALESCE(?, body),
+					mentions       = ?,
+					edit_target_id = ?,
+					quoted_id      = ?,
+					raw_json       = ?
+				WHERE chat_jid = ? AND message_id = ? AND message_type = 'other'`,
+				m.MessageType, nullable(m.Body), mentionsJSON(m.Mentions), nullable(m.EditTargetID), nullable(m.QuotedID),
+				nullable(m.RawJSON), m.ChatJID, m.MessageID); err != nil {
+				return false, err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE messages SET
 				body     = COALESCE(body, ?),
