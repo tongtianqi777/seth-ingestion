@@ -39,7 +39,7 @@ func main() {
 	migrateOnly := flag.Bool("migrate-only", false, "upgrade the message database and fill in missing values, then exit without connecting to WhatsApp")
 	flag.Parse()
 
-	if err := run(*community, *groupsFile, *dataDir, *mediaDir, *logLevel, *migrateOnly); err != nil {
+	if err := run(*community, *groupsFile, paths.ExpandHome(*dataDir), paths.ExpandHome(*mediaDir), *logLevel, *migrateOnly); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
