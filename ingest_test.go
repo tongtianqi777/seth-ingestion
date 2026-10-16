@@ -283,3 +283,111 @@ func TestStatusLine(t *testing.T) {
 		t.Errorf("status lines = %q", out)
 	}
 }
+
+func TestMentions(t *testing.T) {
+	in, store, check := newTestIngester(t)
+	go in.Run(testContext)
+	g, err := store.SaveGroup(testContext, db.Group{JID: preschool.String(), Name: "Preschool", MediaFolder: "preschool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.SetGroups(map[types.JID]*db.Group{preschool: &g})
+
+	mention := func(jids ...types.JID) *waE2E.ContextInfo {
+		ci := &waE2E.ContextInfo{}
+		for _, j := range jids {
+			ci.MentionedJID = append(ci.MentionedJID, j.String())
+		}
+		return ci
+	}
+	unknownLID := types.NewJID("999000111", types.HiddenUserServer)
+	phoebeLID := types.NewJID("888000222", types.HiddenUserServer) // known only by the name she set herself
+	if _, _, err := in.client.Store.Contacts.PutPushName(testContext, phoebeLID, "Phoebe"); err != nil {
+		t.Fatal(err)
+	}
+
+	text := liveText(preschool, liwenLID, "TEXT", "Liwen", "")
+	text.Message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text:        proto.String("@15550000002 @777000111 @888000222 @999000111 @15550000002 hello"),
+		ContextInfo: mention(melissaJID, liwenLID, phoebeLID, unknownLID, melissaJID),
+	}}
+	in.HandleEvent(text)
+
+	// An edit carries the mentions of its new text.
+	edit := liveText(preschool, liwenLID, "EDIT", "Liwen", "")
+	edit.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+		Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+		Key:  &waCommon.MessageKey{ID: proto.String("TEXT")},
+		EditedMessage: &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        proto.String("@15550000001 hello"),
+			ContextInfo: mention(ownJID),
+		}},
+	}}
+	in.HandleEvent(edit)
+
+	caption := liveText(preschool, melissaJID, "PHOTO", "Mel", "")
+	caption.Message = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+		Mimetype: proto.String("image/jpeg"), Caption: proto.String("@15550000002 look"), ContextInfo: mention(melissaJID),
+	}}
+	in.HandleEvent(caption)
+	in.HandleEvent(liveText(preschool, melissaJID, "PLAIN", "Mel", "no mentions"))
+	in.Stop()
+
+	want := map[string]string{
+		// A saved contact name; a LID mapped to a phone number but with no name; a name the person set herself; a bare LID.
+		"TEXT": `[{"id":"15550000002","jid":"15550000002@s.whatsapp.net","name":"Melissa Contact","phone":"15550000002"},` +
+			`{"id":"777000111","jid":"777000111@lid","name":"+15550000003","phone":"15550000003"},` +
+			`{"id":"888000222","jid":"888000222@lid","name":"Phoebe"},` +
+			`{"id":"999000111","jid":"999000111@lid","name":"999000111"}]`,
+		"EDIT":  `[{"id":"15550000001","jid":"15550000001@s.whatsapp.net","name":"Tianqi","phone":"15550000001"}]`,
+		"PHOTO": `[{"id":"15550000002","jid":"15550000002@s.whatsapp.net","name":"Melissa Contact","phone":"15550000002"}]`,
+		"PLAIN": ``,
+	}
+	for id, w := range want {
+		var got sql.NullString
+		if err := check.QueryRow(`SELECT mentions FROM messages WHERE message_id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if got.String != w {
+			t.Errorf("mentions of %s = %s, want %s", id, got.String, w)
+		}
+	}
+}
+
+func TestBackfillMentions(t *testing.T) {
+	in, store, check := newTestIngester(t)
+	g, err := store.SaveGroup(testContext, db.Group{JID: preschool.String(), Name: "Preschool", MediaFolder: "preschool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rows as stored before the mentions column: the mentions are only in raw_json.
+	for id, raw := range map[string]string{
+		"OLD":   `{"extendedTextMessage":{"text":"@15550000002 hi","contextInfo":{"mentionedJID":["15550000002@s.whatsapp.net"]}}}`,
+		"EDIT":  `{"protocolMessage":{"type":"MESSAGE_EDIT","key":{"ID":"OLD"},"editedMessage":{"extendedTextMessage":{"text":"@777000111 hi","contextInfo":{"mentionedJID":["777000111@lid"]}}}}}`,
+		"PLAIN": `{"conversation":"hi"}`,
+	} {
+		if _, err := store.Save(testContext, &db.Message{ChatJID: g.JID, MessageID: id, SenderJID: liwenLID.String(), SentAt: testSentAt,
+			MessageType: "text", Source: "history", RawJSON: raw}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := in.BackfillMentions(testContext); err != nil || n != 2 {
+		t.Fatalf("BackfillMentions = %d, %v; want 2", n, err)
+	}
+	if n, err := in.BackfillMentions(testContext); err != nil || n != 0 {
+		t.Fatalf("second BackfillMentions = %d, %v; want 0", n, err)
+	}
+	for id, w := range map[string]string{
+		"OLD":   `[{"id":"15550000002","jid":"15550000002@s.whatsapp.net","name":"Melissa Contact","phone":"15550000002"}]`,
+		"EDIT":  `[{"id":"777000111","jid":"777000111@lid","name":"+15550000003","phone":"15550000003"}]`,
+		"PLAIN": ``,
+	} {
+		var got sql.NullString
+		if err := check.QueryRow(`SELECT mentions FROM messages WHERE message_id = ?`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.String != w {
+			t.Errorf("mentions of %s = %s, want %s", id, got.String, w)
+		}
+	}
+}

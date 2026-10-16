@@ -229,13 +229,7 @@ func (in *Ingester) phoneFor(ctx context.Context, jid types.JID) string {
 // contact name for them, otherwise the name they set for themselves, otherwise
 // their phone number.
 func (in *Ingester) senderLabel(ctx context.Context, info types.MessageInfo, phone string) string {
-	var contact types.ContactInfo
-	if phone != "" {
-		contact, _ = in.client.Store.Contacts.GetContact(ctx, types.NewJID(phone, types.DefaultUserServer))
-	}
-	if !contact.Found {
-		contact, _ = in.client.Store.Contacts.GetContact(ctx, info.Sender.ToNonAD())
-	}
+	contact := in.contactFor(ctx, info.Sender, phone)
 	names := []string{contact.FullName, contact.FirstName, info.PushName, contact.PushName, contact.BusinessName}
 	if info.IsFromMe {
 		// Your own display name isn't in the contact store; the session has it.
@@ -250,6 +244,92 @@ func (in *Ingester) senderLabel(ctx context.Context, info types.MessageInfo, pho
 		return "+" + phone
 	}
 	return info.Sender.User
+}
+
+// contactFor looks a person up in the contact store, by phone number if known
+// and otherwise by JID.
+func (in *Ingester) contactFor(ctx context.Context, jid types.JID, phone string) types.ContactInfo {
+	var contact types.ContactInfo
+	if phone != "" {
+		contact, _ = in.client.Store.Contacts.GetContact(ctx, types.NewJID(phone, types.DefaultUserServer))
+	}
+	if !contact.Found {
+		contact, _ = in.client.Store.Contacts.GetContact(ctx, jid.ToNonAD())
+	}
+	return contact
+}
+
+// mentionedJIDs returns the JIDs that msg @-mentions, in the order WhatsApp
+// lists them. An edit has the mentions of its new text.
+func mentionedJIDs(msg *waE2E.Message) []string {
+	switch {
+	case msg == nil:
+		return nil
+	case msg.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT:
+		return mentionedJIDs(msg.GetProtocolMessage().GetEditedMessage())
+	case msg.GetExtendedTextMessage() != nil:
+		return msg.GetExtendedTextMessage().GetContextInfo().GetMentionedJID()
+	}
+	if md := mediaOf(msg); md != nil {
+		return md.context.GetMentionedJID()
+	}
+	return nil
+}
+
+// mentionsOf returns the people msg mentions, each with the name to show for
+// them: your saved contact name, otherwise the name they set for themselves,
+// otherwise their phone number. A person mentioned twice is listed once.
+func (in *Ingester) mentionsOf(ctx context.Context, msg *waE2E.Message) []db.Mention {
+	var out []db.Mention
+	seen := map[string]bool{}
+	for _, raw := range mentionedJIDs(msg) {
+		jid, err := types.ParseJID(raw)
+		if err != nil || jid.User == "" || seen[jid.User] {
+			continue
+		}
+		seen[jid.User] = true
+		jid = jid.ToNonAD()
+		phone := in.phoneFor(ctx, jid)
+		out = append(out, db.Mention{ID: jid.User, JID: jid.String(), Name: in.mentionName(ctx, jid, phone), Phone: phone})
+	}
+	return out
+}
+
+func (in *Ingester) mentionName(ctx context.Context, jid types.JID, phone string) string {
+	contact := in.contactFor(ctx, jid, phone)
+	names := []string{contact.FullName, contact.FirstName, contact.PushName, contact.BusinessName}
+	if me, myLID := in.client.Store.ID, in.client.Store.GetLID(); (me != nil && me.User == jid.User) || (!myLID.IsEmpty() && myLID.User == jid.User) {
+		names = append(names, in.client.Store.PushName)
+	}
+	for _, name := range names {
+		if name != "" {
+			return name
+		}
+	}
+	if phone != "" {
+		return "+" + phone
+	}
+	return jid.User
+}
+
+// BackfillMentions sets the mentions of stored messages that predate the
+// mentions column, from their raw_json. It returns how many it set.
+func (in *Ingester) BackfillMentions(ctx context.Context) (int, error) {
+	todo, err := in.store.UnresolvedMentions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, u := range todo {
+		var msg waE2E.Message
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal([]byte(u.RawJSON), &msg); err != nil {
+			in.log.Warnf("Skipping mentions of message %s: bad raw_json: %v", u.MessageID, err)
+			continue
+		}
+		if err := in.store.SetMentions(ctx, u.ChatJID, u.MessageID, in.mentionsOf(ctx, &msg)); err != nil {
+			return 0, err
+		}
+	}
+	return len(todo), nil
 }
 
 func (in *Ingester) process(ctx context.Context, evt *events.Message, source string, g *db.Group) error {
@@ -278,6 +358,7 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 	if raw, err := protojson.Marshal(msg); err == nil {
 		m.RawJSON = string(raw)
 	}
+	m.Mentions = in.mentionsOf(ctx, msg)
 
 	var atts []db.MediaFile
 	hdID := "" // the stored HD copy that replaces the low-resolution file of this message

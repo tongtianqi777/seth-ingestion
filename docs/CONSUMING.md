@@ -107,6 +107,7 @@ Every endpoint that returns messages returns them in this shape. The field names
   "message_type": "text",
   "body": "Pickup is at 3 today",
   "current_body": "Pickup is at 3:30 today",
+  "mentions": [],
   "edited": true,
   "edited_at": "2026-10-14T16:03:00Z",
   "edit_target_id": null,
@@ -127,6 +128,7 @@ Every endpoint that returns messages returns them in this shape. The field names
 | `message_type` | `text`, `image`, `video`, `voice`, `audio`, `document`, `sticker`, `album`, `edit` or `other` |
 | `body` | The text or caption as first sent |
 | `current_body` | The text with the latest edit applied. **Use this one.** Not present on `edit` rows |
+| `mentions` | The people @-mentioned in `body` and `current_body`. WhatsApp writes `@<id>` in the text; see [Mentions](#mentions). Always present, `[]` if none |
 | `edited`, `edited_at` | Whether the message was edited, and when it last was |
 | `edit_target_id` | On an `edit` row: the message it changes |
 | `quoted_id` | The `message_id` this message replies to, in the same group |
@@ -504,6 +506,29 @@ What the rows mean:
 | `edit` | A change to an earlier message. `body` is the new text, `edit_target_id` the message it changes. The original row is left as it was |
 | `other` | A reaction, location, poll, contact card and so on. The details are only in `raw_json` |
 | `quoted_id` is set | The message replies to the message with that `message_id` in the same group |
+
+**Mentions.** A message that tags someone has `@<id>` in its text, such as `tomorrow is @277600983331013`, where `<id>` is an opaque number, not a phone number. `messages.mentions` (`mentions` in the API) says who each id is:
+
+```json
+"body": "tomorrow is @277600983331013",
+"mentions": [{ "id": "277600983331013", "jid": "277600983331013@lid", "name": "Zebao Gao", "phone": "12404758388" }]
+```
+
+To show names, replace `@<id>` with `@<name>` for each element. `name` is always set: your saved contact name, else the name they set themselves, else `+<phone>`, else the id. `phone` is missing when WhatsApp hasn't shared one. Match on `id`, not on `phone` or `name`, which can be missing or change. Names are as they were when the message was ingested.
+
+```python
+text = m["current_body"]
+for x in m["mentions"]:
+    text = text.replace("@" + x["id"], "@" + x["name"])
+```
+
+On the feed, an edited message's `mentions` cover both the text as first sent and the latest edit, so the same loop works on `body` and `current_body`. In the database, each row's `mentions` belongs to that row's own text, so for an edited message read the mentions of the latest `edit` row too. In SQL, read them with `json_each`:
+
+```sql
+SELECT m.message_id, j.value ->> 'id' AS id, j.value ->> 'name' AS name, j.value ->> 'phone' AS phone
+FROM messages m, json_each(m.mentions) j
+WHERE m.mentions IS NOT NULL;
+```
 
 **Who sent it.** `sender` is a display name: your saved contact name for the person, or the name they set themselves. It can differ between messages. To tell people apart, use `sender_phone` where it's set, or else `sender_jid`.
 

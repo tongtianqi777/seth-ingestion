@@ -35,15 +35,16 @@ func main() {
 		logLevel   = flag.String("log-level", env("SETH_LOG_LEVEL", "INFO"), "DEBUG, INFO, WARN or ERROR")
 	)
 	flag.BoolVar(&statusLines, "status-lines", env("SETH_STATUS_LINES", "") != "", "also print machine-readable \"@seth ...\" lines (the QR code and link status) for seth-dashboard")
+	migrateOnly := flag.Bool("migrate-only", false, "upgrade the message database and fill in missing values, then exit without connecting to WhatsApp")
 	flag.Parse()
 
-	if err := run(*community, *groupsFile, *dataDir, *mediaDir, *logLevel); err != nil {
+	if err := run(*community, *groupsFile, *dataDir, *mediaDir, *logLevel, *migrateOnly); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(community, groupsFile, dataDir, mediaDir, logLevel string) error {
+func run(community, groupsFile, dataDir, mediaDir, logLevel string, migrateOnly bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -85,6 +86,21 @@ func run(community, groupsFile, dataDir, mediaDir, logLevel string) error {
 		return fmt.Errorf("merge HD duplicates: %w", err)
 	} else if n > 0 {
 		log.Infof("Merged %d low-resolution duplicates into their HD files", n)
+	}
+
+	// Names come from the session's contact store, so this needs the session but not a connection.
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		return fmt.Errorf("load device: %w", err)
+	}
+	if n, err := NewIngester(whatsmeow.NewClient(device, waLog.Noop), store, mediaDir, log).BackfillMentions(ctx); err != nil {
+		return fmt.Errorf("backfill mentions: %w", err)
+	} else if n > 0 {
+		log.Infof("Set mentions on %d existing messages", n)
+	}
+	if migrateOnly {
+		log.Infof("Database is up to date")
+		return nil
 	}
 
 	cfg := sessionConfig{store: store, community: community, groupNames: groupNames, dataDir: dataDir, mediaDir: mediaDir, log: log}

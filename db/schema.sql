@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS messages (
     -- Content
     message_type    TEXT    NOT NULL,              -- text | image | video | audio | voice | document | sticker | album | edit | other
     body            TEXT,                          -- text body, or the media caption (for an album, the first caption received)
+    mentions        TEXT,                          -- JSON array of the people @-mentioned in body, NULL if none:
+                                                   -- [{"id":"112481015967925","jid":"112481015967925@lid","name":"Phoebe","phone":"14082197736"}].
+                                                   -- body holds "@<id>"; replace it with "@<name>"
     edit_target_id  TEXT,                          -- for message_type = 'edit': the edited message's ID
     quoted_id       TEXT,                          -- ID of the message this one replies to, if any
     media_file_count INTEGER NOT NULL DEFAULT 0,   -- number of rows in message_media_files for this message
