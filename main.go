@@ -81,6 +81,12 @@ func run(community, groupsFile, dataDir, mediaDir, logLevel string) error {
 		log.Infof("Moved %d existing media files into message_media_files", n)
 	}
 
+	if n, err := mergeHDDuplicates(ctx, store, mediaDir, log); err != nil {
+		return fmt.Errorf("merge HD duplicates: %w", err)
+	} else if n > 0 {
+		log.Infof("Merged %d low-resolution duplicates into their HD files", n)
+	}
+
 	cfg := sessionConfig{store: store, community: community, groupNames: groupNames, dataDir: dataDir, mediaDir: mediaDir, log: log}
 	for {
 		device, err := container.GetFirstDevice(ctx)

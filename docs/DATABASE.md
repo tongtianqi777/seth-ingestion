@@ -181,6 +181,14 @@ View-once and disappearing messages are stored like ordinary ones. whatsmeow unw
 
 **Not stored:** messages in groups that aren't monitored, direct chats, status updates, broadcast lists and newsletters. The program filters these out before anything is written. Notices in a group's history with no message content, such as "… joined from the community", are skipped too.
 
+## HD photos and videos
+
+When someone sends a photo or video with "HD quality", WhatsApp delivers two messages: a low-resolution one (paired media type `SD_IMAGE_PARENT` or `SD_VIDEO_PARENT`) and, a moment later, the HD one. The HD message's `messageAssociation` (`HD_IMAGE_DUAL_UPLOAD` or `HD_VIDEO_DUAL_UPLOAD`) names the low-resolution message as its parent. History sync may deliver them in either order.
+
+Only the HD file is kept. It takes the place of the low-resolution file: the same `messages` row, `position` and `source_message_id` (the low-resolution message's ID), with the HD file's path, size and hash. The HD message gets no row of its own. If the HD file can't be downloaded, the low-resolution file stays. If the low-resolution message isn't stored at all, the HD message is stored like any other media message. Startup also merges pairs left by older versions, and deletes the low-resolution files.
+
+Motion photos and HEVC/AV1 video pairs are different content, so both of those files are kept.
+
 ## Albums
 
 When several photos or videos are sent together, WhatsApp shows them as an album. On the wire, an album is:

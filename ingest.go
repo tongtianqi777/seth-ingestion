@@ -280,6 +280,7 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 	}
 
 	var atts []db.MediaFile
+	hdID := "" // the stored HD copy that replaces the low-resolution file of this message
 	md := mediaOf(msg)
 	switch {
 	case msg.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT:
@@ -295,7 +296,26 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		if err != nil || seen {
 			return err
 		}
-		att := in.saveMedia(ctx, md, info, g.MediaFolder)
+		if parentID, ok := hdParent(msg); ok {
+			done, err := in.replaceWithHD(ctx, md, info, g, parentID)
+			if err != nil || done {
+				return err
+			}
+			// The low-resolution copy isn't stored, so this is the only copy.
+		}
+		var att db.MediaFile
+		if isLowResParent(md) {
+			var err error
+			if hdID, _, err = in.store.HDChildOf(ctx, m.ChatJID, info.ID); err != nil {
+				return err
+			}
+		}
+		if hdID != "" {
+			// The HD copy came first and is stored; it takes this one's place below, so skip the download.
+			att = newMediaFile(md, info)
+		} else {
+			att = in.saveMedia(ctx, md, info, g.MediaFolder)
+		}
 		if parentID, index, ok := albumParent(msg); ok {
 			// Store the file under the album's message, so the album stays one messages row.
 			// The album's own message fills in raw_json when it arrives.
@@ -324,12 +344,42 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 	if isNew {
 		in.log.Infof("Stored %s %s message %s in %s from %s: %q", source, m.MessageType, m.MessageID, g.Name, m.Sender, truncate(m.Body, 80))
 	}
+	if hdID != "" {
+		if _, err := mergeHD(ctx, in.store, in.mediaDir, in.log, m.ChatJID, hdID, info.ID); err != nil {
+			return err
+		}
+	}
 	for _, a := range atts {
-		if a.Error == "" {
+		if a.Error == "" && a.RelativePath != "" {
 			in.log.Infof("Saved %s media file of message %s: %s", a.MediaType, m.MessageID, a.RelativePath)
 		}
 	}
 	return nil
+}
+
+// replaceWithHD saves md, the HD copy of message parentID, in the place of
+// parentID's low-resolution file. It reports false if that message isn't
+// stored, so there is nothing to replace.
+func (in *Ingester) replaceWithHD(ctx context.Context, md *media, info types.MessageInfo, g *db.Group, parentID string) (bool, error) {
+	slot, err := in.store.MediaFile(ctx, g.JID, parentID)
+	if err != nil || slot == nil {
+		return false, err
+	}
+	rel := mediaRelPath(g.MediaFolder, info, md)
+	if slot.RelativePath == rel {
+		return true, nil // replaced earlier, and this is the message arriving again
+	}
+	att := in.saveMedia(ctx, md, info, g.MediaFolder)
+	if att.Error != "" {
+		return true, nil // keep what is stored; the HD message is retried if it comes again
+	}
+	old, _, err := in.store.ReplaceMediaFile(ctx, g.JID, parentID, att)
+	if err != nil {
+		return true, err
+	}
+	removeMedia(in.mediaDir, old, att.RelativePath, in.log)
+	in.log.Infof("Kept the HD file %s of message %s; dropped its low-resolution copy", att.RelativePath, parentID)
+	return true, nil
 }
 
 // media is a downloadable file carried by a message.
@@ -377,15 +427,20 @@ func albumParent(msg *waE2E.Message) (parentID string, index int, ok bool) {
 	return parentID, int(assoc.GetMessageIndex()), parentID != ""
 }
 
-// saveMedia downloads md into folder, a folder of the media dir.
-func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.MessageInfo, folder string) db.MediaFile {
-	att := db.MediaFile{
+// newMediaFile describes md as a media file that isn't saved yet.
+func newMediaFile(md *media, info types.MessageInfo) db.MediaFile {
+	return db.MediaFile{
 		SourceMessageID: info.ID,
 		MediaType:       md.kind,
 		Caption:         md.caption,
 		FileName:        md.fileName,
 		Mime:            md.mime,
 	}
+}
+
+// saveMedia downloads md into folder, a folder of the media dir.
+func (in *Ingester) saveMedia(ctx context.Context, md *media, info types.MessageInfo, folder string) db.MediaFile {
+	att := newMediaFile(md, info)
 	data, err := in.client.Download(ctx, md.file)
 	if err != nil {
 		att.Error = err.Error()
