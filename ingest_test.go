@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -389,5 +390,65 @@ func TestBackfillMentions(t *testing.T) {
 		if got.String != w {
 			t.Errorf("mentions of %s = %s, want %s", id, got.String, w)
 		}
+	}
+}
+
+// TestKeyExchangeEvent replays how WhatsApp delivers a new sender's first
+// message: an event with only the sender key, then one with the text, both
+// with the message's ID.
+func TestKeyExchangeEvent(t *testing.T) {
+	in, store, check := newTestIngester(t)
+	go in.Run(testContext)
+	g, err := store.SaveGroup(testContext, db.Group{JID: preschool.String(), Name: "Preschool", MediaFolder: "preschool"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.SetGroups(map[types.JID]*db.Group{preschool: &g})
+
+	key := &waE2E.SenderKeyDistributionMessage{GroupID: proto.String(preschool.String()), AxolotlSenderKeyDistributionMessage: []byte("key")}
+	stub := liveText(preschool, melissaJID, "FIRST", "Mel", "")
+	stub.Message = &waE2E.Message{SenderKeyDistributionMessage: key, MessageContextInfo: &waE2E.MessageContextInfo{}}
+	in.HandleEvent(stub)
+	in.HandleEvent(&events.Message{Info: stub.Info, Message: &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text:        proto.String("tomorrow is @777000111"),
+		ContextInfo: &waE2E.ContextInfo{MentionedJID: []string{liwenLID.String()}, StanzaID: proto.String("EARLIER")},
+	}}})
+
+	// A message that carries the key along with its text is a message.
+	both := liveText(preschool, melissaJID, "BOTH", "Mel", "")
+	both.Message = &waE2E.Message{Conversation: proto.String("hello"), SenderKeyDistributionMessage: key}
+	in.HandleEvent(both)
+
+	// A key event whose message never arrives leaves no row.
+	lonely := liveText(preschool, melissaJID, "LONELY", "Mel", "")
+	lonely.Message = &waE2E.Message{SenderKeyDistributionMessage: key}
+	in.HandleEvent(lonely)
+	in.Stop()
+
+	type row struct{ typ, body, mentions, quoted, raw string }
+	got := map[string]row{}
+	rows, err := check.Query(`SELECT message_id, message_type, COALESCE(body, ''), COALESCE(mentions, ''), COALESCE(quoted_id, ''), COALESCE(raw_json, '') FROM messages`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		var r row
+		if err := rows.Scan(&id, &r.typ, &r.body, &r.mentions, &r.quoted, &r.raw); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = r
+	}
+	rows.Close()
+	if len(got) != 2 {
+		t.Errorf("stored %v, want only FIRST and BOTH", keys(got))
+	}
+	if r := got["FIRST"]; r.typ != "text" || r.body != "tomorrow is @777000111" || r.quoted != "EARLIER" ||
+		r.mentions != `[{"id":"777000111","jid":"777000111@lid","name":"+15550000003","phone":"15550000003"}]` ||
+		!strings.Contains(r.raw, "tomorrow is") {
+		t.Errorf("FIRST = %+v, want the text message with its mention", r)
+	}
+	if r := got["BOTH"]; r.typ != "text" || r.body != "hello" {
+		t.Errorf("BOTH = %+v, want a text message", r)
 	}
 }

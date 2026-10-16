@@ -238,6 +238,8 @@ All writes go through `Store.Save` (in [db/db.go](../db/db.go)). It writes one m
 
 This happens when an album's items arrive before the album message, and when history sync repeats a message the program already has.
 
+**A stored `other` row that turns out to be a real message.** WhatsApp can deliver a new sender's first message as two events with the same message ID: one that carries only the sender's encryption key, then the message itself. seth-ingestion ignores events that carry nothing but a key (`keyDistributionOnly` in [ingest.go](../ingest.go)). If a row of type `other` is already stored when the message arrives as something else, as can happen with rows written by earlier versions, Save lets the message take the row over: `message_type`, `body`, `mentions`, `edit_target_id`, `quoted_id` and `raw_json` are replaced with the message's. A row that is already a real message is never replaced.
+
 **Media file rows.** Save inserts each file, and skips any file whose `(chat_jid, source_message_id)` is already stored. It then recomputes `media_file_count` from the actual rows.
 
 **Avoiding repeat downloads.** Before downloading anything, the program checks whether that file's `source_message_id` is already stored, using `Store.MediaFileExists`. If it is, the message is skipped. That's why messages repeated by history sync aren't downloaded twice.

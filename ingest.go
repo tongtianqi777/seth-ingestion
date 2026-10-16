@@ -18,6 +18,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tianqitong/seth-ingestion/db"
 )
@@ -343,6 +344,13 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		msg = child
 	}
 
+	if keyDistributionOnly(msg) {
+		// WhatsApp sends the key a new sender needs in its own event, with the same ID as the message that
+		// follows. It has no content, and the row it would create is filled in wrongly by the real message.
+		in.log.Debugf("Skipping the key exchange event of message %s", info.ID)
+		return nil
+	}
+
 	phone := in.senderPhone(ctx, info.MessageSource)
 	m := &db.Message{
 		ChatJID:     g.JID,
@@ -436,6 +444,17 @@ func (in *Ingester) process(ctx context.Context, evt *events.Message, source str
 		}
 	}
 	return nil
+}
+
+// keyDistributionOnly reports whether msg carries a sender key (what lets a
+// group member read someone's messages) and nothing a person wrote or sent.
+func keyDistributionOnly(msg *waE2E.Message) bool {
+	if msg.GetSenderKeyDistributionMessage() == nil && msg.GetFastRatchetKeySenderKeyDistributionMessage() == nil {
+		return false
+	}
+	rest := proto.Clone(msg).(*waE2E.Message)
+	rest.SenderKeyDistributionMessage, rest.FastRatchetKeySenderKeyDistributionMessage, rest.MessageContextInfo = nil, nil, nil
+	return proto.Size(rest) == 0
 }
 
 // replaceWithHD saves md, the HD copy of message parentID, in the place of

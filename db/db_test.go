@@ -305,3 +305,37 @@ func TestMigrateMentions(t *testing.T) {
 	}
 	s2.Close()
 }
+
+// TestSaveTakesOverOtherRow covers a row made from an event that carried none
+// of the message, which the message itself then arrives for.
+func TestSaveTakesOverOtherRow(t *testing.T) {
+	ctx := context.Background()
+	s := openTemp(t)
+	t0 := time.Now()
+	stub := msg("M1", "other", "", t0)
+	stub.RawJSON = `{"senderKeyDistributionMessage":{}}`
+	if _, err := s.Save(ctx, stub, nil); err != nil {
+		t.Fatal(err)
+	}
+	real := msg("M1", "text", "tomorrow is @1", t0)
+	real.QuotedID = "Q1"
+	real.RawJSON = `{"conversation":"tomorrow is @1"}`
+	real.Mentions = []Mention{{ID: "1", JID: "1@lid", Name: "Zebao Gao"}}
+	if isNew, err := s.Save(ctx, real, nil); err != nil || isNew {
+		t.Fatalf("Save = %v, %v; want the existing row updated", isNew, err)
+	}
+	// The stub arriving again, or a repeat of the message, changes nothing.
+	for _, again := range []*Message{stub, real} {
+		if _, err := s.Save(ctx, again, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var typ, body, quoted, raw, mentions string
+	if err := s.db.QueryRow(`SELECT message_type, body, quoted_id, raw_json, mentions FROM messages WHERE message_id = 'M1'`).
+		Scan(&typ, &body, &quoted, &raw, &mentions); err != nil {
+		t.Fatal(err)
+	}
+	if typ != "text" || body != "tomorrow is @1" || quoted != "Q1" || raw != real.RawJSON || mentions != `[{"id":"1","jid":"1@lid","name":"Zebao Gao"}]` {
+		t.Errorf("row = %s %q %q %q %s; want the real message", typ, body, quoted, raw, mentions)
+	}
+}
