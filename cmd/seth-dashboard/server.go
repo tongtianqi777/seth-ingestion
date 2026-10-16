@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"rsc.io/qr"
+
+	"github.com/tianqitong/seth-ingestion/internal/paths"
 )
 
 //go:embed static
@@ -31,7 +33,7 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	return Config{DataDir: "data", MediaDir: "/Users/tnpbot/Downloads/whatsapp-poc-images", FeedAddr: "127.0.0.1:8080"}
+	return Config{DataDir: paths.DefaultDataDir, MediaDir: paths.DefaultMediaDir, FeedAddr: "127.0.0.1:8080"}
 }
 
 func (c Config) validate() error {
@@ -101,9 +103,10 @@ func (d *dashboard) saveConfig(c Config) error {
 	return os.WriteFile(d.configPath, append(data, '\n'), 0o644)
 }
 
-// abs shows a path as the services will see it: relative paths are relative
-// to the repo, where the scripts run.
+// abs shows a path as the services will see it: "~" is the home folder, and
+// other relative paths are relative to the repo, where the scripts run.
 func (d *dashboard) abs(p string) string {
+	p = paths.ExpandHome(p)
 	if filepath.IsAbs(p) {
 		return p
 	}

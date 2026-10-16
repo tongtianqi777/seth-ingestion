@@ -25,7 +25,7 @@ How seth-ingestion works inside, and how to change and test it. For setup and us
 | `docs/` | These guides, and the logo in `docs/assets/` |
 | `data-sim/` | The simulator's database and media, ignored by git |
 | `dashboard.json` | The dashboard's saved settings, ignored by git |
-| `data/` | Runtime state, ignored by git: `messages.db` (the recorded messages) and `whatsmeow-session.db` (the linked device's keys and session, managed by whatsmeow) |
+| `~/seth-ingestion-data/data/` | Runtime state, outside the repo: `messages.db` (the recorded messages) and `whatsmeow-session.db` (the linked device's keys and session, managed by whatsmeow) |
 
 ## How it works
 
