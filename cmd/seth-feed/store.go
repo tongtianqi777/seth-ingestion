@@ -108,6 +108,7 @@ type Message struct {
 	MessageType    string           `json:"message_type"`
 	Body           *string          `json:"body"`
 	CurrentBody    *string          `json:"current_body,omitempty"` // body with the latest edit applied; not on edit rows
+	Mentions       []Mention        `json:"mentions"`               // who the "@<id>" in body and current_body are
 	Edited         bool             `json:"edited"`
 	EditedAt       *string          `json:"edited_at,omitempty"`
 	EditTargetID   *string          `json:"edit_target_id"`
@@ -118,6 +119,41 @@ type Message struct {
 	RawJSON        *json.RawMessage `json:"raw_json,omitempty"`
 	Quoted         *Message         `json:"quoted,omitempty"`  // the message replied to, on GET /messages/{chat_jid}/{message_id}
 	Updated        bool             `json:"updated,omitempty"` // on /messages/new: an earlier message that gained files
+}
+
+// Mention is a person @-mentioned in a message. WhatsApp writes "@<id>" into
+// the text; replace it with "@<name>".
+type Mention struct {
+	ID    string  `json:"id"`
+	JID   string  `json:"jid"`
+	Name  string  `json:"name"`
+	Phone *string `json:"phone,omitempty"`
+}
+
+// decodeMentions reads a messages.mentions value. It skips values it can't
+// read, so a bad row costs that message its mentions and nothing more.
+func decodeMentions(raw sql.NullString) []Mention {
+	var ms []Mention
+	if raw.Valid {
+		_ = json.Unmarshal([]byte(raw.String), &ms)
+	}
+	return ms
+}
+
+// mergeMentions returns the mentions of a message as first sent, then any in
+// its latest edit that weren't, so every "@<id>" in body or current_body is covered.
+func mergeMentions(first, edit []Mention) []Mention {
+	out := append([]Mention{}, first...)
+	for _, e := range edit {
+		dup := false
+		for _, m := range out {
+			dup = dup || m.ID == e.ID
+		}
+		if !dup {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // File is one row of message_media_files. URL is where GET /media/{id}
@@ -157,7 +193,9 @@ func (q *messageQuery) add(cond string, args ...any) {
 const messageColumns = `
 	m.rowid, m.chat_jid, m.message_id, g.name, m.sender, m.sender_jid, m.sender_phone, m.sender_name,
 	m.sent_at, m.ingested_at, m.message_type, m.body, m.edit_target_id, m.quoted_id, m.media_file_count,
-	m.source, m.raw_json,
+	m.source, m.raw_json, m.mentions,
+	(SELECT e.mentions FROM messages e WHERE e.chat_jid = m.chat_jid AND e.message_type = 'edit' AND e.edit_target_id = m.message_id
+	 ORDER BY e.sent_at DESC, e.rowid DESC LIMIT 1),
 	(SELECT e.body FROM messages e WHERE e.chat_jid = m.chat_jid AND e.message_type = 'edit' AND e.edit_target_id = m.message_id
 	 ORDER BY e.sent_at DESC, e.rowid DESC LIMIT 1),
 	(SELECT e.sent_at FROM messages e WHERE e.chat_jid = m.chat_jid AND e.message_type = 'edit' AND e.edit_target_id = m.message_id
@@ -187,14 +225,16 @@ func (r *reader) messages(ctx context.Context, q querier, mq messageQuery) ([]Me
 	msgs := []Message{}
 	for rows.Next() {
 		var m Message
-		var raw, latestEdit, editedAt sql.NullString
+		var raw, mentions, editMentions, latestEdit, editedAt sql.NullString
 		if err := rows.Scan(&m.Seq, &m.ChatJID, &m.MessageID, &m.Group, &m.Sender, &m.SenderJID, &m.SenderPhone, &m.SenderName,
 			&m.SentAt, &m.IngestedAt, &m.MessageType, &m.Body, &m.EditTargetID, &m.QuotedID, &m.MediaFileCount,
-			&m.Source, &raw, &latestEdit, &editedAt); err != nil {
+			&m.Source, &raw, &mentions, &editMentions, &latestEdit, &editedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		m.Mentions = decodeMentions(mentions)
 		if m.MessageType != "edit" {
+			m.Mentions = mergeMentions(m.Mentions, decodeMentions(editMentions))
 			m.CurrentBody = m.Body
 			if latestEdit.Valid {
 				m.CurrentBody, m.Edited, m.EditedAt = &latestEdit.String, true, &editedAt.String

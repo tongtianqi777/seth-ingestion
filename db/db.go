@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -27,10 +28,33 @@ type Message struct {
 	SentAt       time.Time
 	MessageType  string
 	Body         string
+	Mentions     []Mention
 	EditTargetID string
 	QuotedID     string
 	Source       string
 	RawJSON      string
+}
+
+// Mention is a person @-mentioned in a message. WhatsApp writes "@<ID>" into
+// the text, with ID the user part of the mentioned JID, so a reader finds the
+// name to show by matching that. Name is always set: the contact's name, else
+// "+<phone>", else ID. Phone is empty if the JID is a LID that isn't mapped.
+type Mention struct {
+	ID    string `json:"id"`
+	JID   string `json:"jid"`
+	Name  string `json:"name"`
+	Phone string `json:"phone,omitempty"`
+}
+
+func mentionsJSON(ms []Mention) any {
+	if len(ms) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(ms)
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }
 
 // MediaFile is one media file belonging to a Message.
@@ -79,6 +103,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	added := map[string]string{
 		"sender":           `ALTER TABLE messages ADD COLUMN sender TEXT NOT NULL DEFAULT ''`,
 		"media_file_count": `ALTER TABLE messages ADD COLUMN media_file_count INTEGER NOT NULL DEFAULT 0`,
+		"mentions":         `ALTER TABLE messages ADD COLUMN mentions TEXT`,
 	}
 	for col, stmt := range added {
 		if !cols[col] {
@@ -119,6 +144,47 @@ func (s *Store) BackfillSender(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// UnresolvedMention is a stored message whose raw_json mentions people but
+// whose mentions column isn't set yet.
+type UnresolvedMention struct {
+	ChatJID, MessageID, RawJSON string
+}
+
+// UnresolvedMentions returns the messages that mention people and have no
+// mentions yet: those stored before the column existed. SetMentions takes them
+// off this list, even if none of the mentioned people could be resolved.
+func (s *Store) UnresolvedMentions(ctx context.Context) ([]UnresolvedMention, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chat_jid, message_id, raw_json FROM messages
+		WHERE mentions IS NULL AND raw_json LIKE '%"mentionedJID"%'
+		ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UnresolvedMention
+	for rows.Next() {
+		var u UnresolvedMention
+		if err := rows.Scan(&u.ChatJID, &u.MessageID, &u.RawJSON); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// SetMentions sets the mentions of a stored message that has none. An empty
+// list is stored as [], so the message isn't returned by UnresolvedMentions again.
+func (s *Store) SetMentions(ctx context.Context, chatJID, messageID string, ms []Mention) error {
+	val := mentionsJSON(ms)
+	if val == nil {
+		val = "[]"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE messages SET mentions = ? WHERE chat_jid = ? AND message_id = ? AND mentions IS NULL`,
+		val, chatJID, messageID)
+	return err
 }
 
 // legacyMediaColumns are the columns on messages that held a single media file
@@ -312,11 +378,11 @@ func (s *Store) Save(ctx context.Context, m *Message, atts []MediaFile) (bool, e
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (
 			chat_jid, message_id, sender, sender_jid, sender_phone, sender_name, is_group,
-			sent_at, ingested_at, message_type, body, edit_target_id, quoted_id, source, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			sent_at, ingested_at, message_type, body, mentions, edit_target_id, quoted_id, source, raw_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (chat_jid, message_id) DO NOTHING`,
 		m.ChatJID, m.MessageID, m.Sender, m.SenderJID, nullable(m.SenderPhone), nullable(m.SenderName), m.IsGroup,
-		sentAt, now, m.MessageType, nullable(m.Body), nullable(m.EditTargetID), nullable(m.QuotedID),
+		sentAt, now, m.MessageType, nullable(m.Body), mentionsJSON(m.Mentions), nullable(m.EditTargetID), nullable(m.QuotedID),
 		m.Source, nullable(m.RawJSON),
 	)
 	if err != nil {
@@ -328,10 +394,11 @@ func (s *Store) Save(ctx context.Context, m *Message, atts []MediaFile) (bool, e
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE messages SET
 				body     = COALESCE(body, ?),
+				mentions = COALESCE(mentions, ?),
 				raw_json = COALESCE(raw_json, ?),
 				sent_at  = MIN(sent_at, ?)
 			WHERE chat_jid = ? AND message_id = ?`,
-			nullable(m.Body), nullable(m.RawJSON), sentAt, m.ChatJID, m.MessageID); err != nil {
+			nullable(m.Body), mentionsJSON(m.Mentions), nullable(m.RawJSON), sentAt, m.ChatJID, m.MessageID); err != nil {
 			return false, err
 		}
 	}

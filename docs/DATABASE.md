@@ -40,6 +40,7 @@ erDiagram
         TEXT sender
         TEXT message_type
         TEXT body
+        TEXT mentions
         INTEGER media_file_count
         TEXT sent_at
     }
@@ -101,6 +102,7 @@ Like every ordinary SQLite table, `messages` also has a built-in `rowid`. Each n
 | `ingested_at` | TEXT | no | When seth-ingestion first wrote the row |
 | `message_type` | TEXT | no | What kind of message this is. See [Message types](#message-types) |
 | `body` | TEXT | yes | The text of a `text` or `edit` message, or the caption of a media message. For an album, the first caption received from any of its items |
+| `mentions` | TEXT | yes | The people @-mentioned in `body`, as a JSON array; `NULL` if there are none (and for older messages that had none). WhatsApp writes `@<id>` into the text, where `<id>` is the number part of the person's JID. Each element is `{"id", "jid", "name", "phone"}`: replace `@<id>` with `@<name>`. `name` is always set (your saved contact name, else the name they set for themselves, else `+<phone>`, else the id) as of when the message was ingested. `phone` is left out when a LID has no known phone number. Example: `[{"id":"112481015967925","jid":"112481015967925@lid","name":"Phoebe Liu","phone":"14082197736"}]`. Read it with `json_each(mentions)` |
 | `edit_target_id` | TEXT | yes | For `edit` rows only: the ID of the message that was edited |
 | `quoted_id` | TEXT | yes | If this message is a reply, the ID of the message it replies to |
 | `media_file_count` | INTEGER | no | How many `message_media_files` rows belong to this message. `0` for messages without files |
@@ -229,6 +231,7 @@ All writes go through `Store.Save` (in [db/db.go](../db/db.go)). It writes one m
 | Column | When the row already exists |
 |---|---|
 | `body` | set only if it's currently `NULL` |
+| `mentions` | set only if it's currently `NULL` |
 | `raw_json` | set only if it's currently `NULL` |
 | `sent_at` | replaced by the new value if that's earlier |
 | everything else | unchanged |
@@ -350,16 +353,20 @@ On every start, `db.Open` brings the database up to date. Nothing needs to be se
 
 ```mermaid
 flowchart TD
-    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count)"]
+    Open["db.Open"] --> Migrate["migrate:<br/>add missing columns to an existing messages table<br/>(sender, media_file_count, mentions)"]
     Migrate --> Schema["run schema.sql:<br/>CREATE TABLE / INDEX IF NOT EXISTS"]
     Schema --> Sender["Store.BackfillSender:<br/>set sender on old rows that have none"]
     Sender --> Legacy["Store.MigrateLegacyMedia:<br/>move old media columns into message_media_files,<br/>then drop them (one transaction)"]
+    Legacy --> Mentions["Ingester.BackfillMentions:<br/>set mentions on old rows from raw_json"]
 ```
 
 - **`schema.sql` always describes the full current schema.** A new database is created from it directly, and an older one gets any tables and indexes it's missing, such as `chat_groups`. Every statement is `IF NOT EXISTS`, so running it again is harmless.
 - **`migrate` runs before `schema.sql`.** An index in `schema.sql` may refer to a column that an older table doesn't have yet. Adding the column first lets the index be created.
 - **`BackfillSender`** fills in `sender` on rows written before the column existed, with the row's `sender_name`, or else `+<sender_phone>`, or else `sender_jid`.
+- **`BackfillMentions`** sets `mentions` on rows written before the column existed. It reads the mentioned JIDs from each row's `raw_json` and looks the names up in the WhatsApp session's contact store, so it runs from `main.go` once the session is open, not inside `db.Open`. A row it has handled gets `[]` if it turned out to mention nobody, so it isn't looked at again. Names are as the contact store has them when it runs.
 - **`MigrateLegacyMedia`** upgrades databases from versions that stored at most one image per message directly on `messages`, in the columns `media_path`, `image_relative_path`, `media_mime`, `media_size`, `media_sha256` and `media_error`. It copies each image into `message_media_files`, drops those columns and recomputes `media_file_count`, all in one transaction. It needs the media folder to work out relative paths, so `main.go` calls it after `Open`. Once the old columns are gone it does nothing.
+
+To upgrade a database without connecting to WhatsApp (for example while another instance is running), run `./bin/seth-ingestion -migrate-only`. It applies all of the above and exits. Back the database up first.
 
 ### Changing the schema
 

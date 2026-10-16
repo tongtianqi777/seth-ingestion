@@ -220,6 +220,36 @@ func TestMessageViewMatchesTheGuide(t *testing.T) {
 	f.get("/messages/"+url.PathEscape(preschoolJID)+"/NOPE", 404, &e)
 }
 
+// TestMentions checks that mentions cover both the text as first sent and the
+// latest edit, and that a message without any has an empty list.
+func TestMentions(t *testing.T) {
+	f := newFixture(t)
+	phoebe := db.Mention{ID: "112481015967925", JID: "112481015967925@lid", Name: "Phoebe", Phone: "14082197736"}
+	melissa := db.Mention{ID: "233088042954950", JID: "233088042954950@lid", Name: "Melissa"}
+	orig := msg(preschoolJID, "M1", "text", "@112481015967925 @233088042954950 is the food here?", 10)
+	orig.Mentions = []db.Mention{phoebe, melissa}
+	f.save(orig, nil)
+	edit := msg(preschoolJID, "M1E", "edit", "@233088042954950 is the food here?", 11)
+	edit.EditTargetID = "M1"
+	edit.Mentions = []db.Mention{melissa}
+	f.save(edit, nil)
+
+	var m Message
+	f.get("/messages/"+url.PathEscape(preschoolJID)+"/M1", 200, &m)
+	if len(m.Mentions) != 2 || m.Mentions[0].Name != "Phoebe" || *m.Mentions[0].Phone != "14082197736" || m.Mentions[1].Name != "Melissa" || m.Mentions[1].Phone != nil {
+		t.Errorf("M1 mentions = %+v", m.Mentions)
+	}
+	f.get("/messages/"+url.PathEscape(preschoolJID)+"/M1E", 200, &m)
+	if len(m.Mentions) != 1 || m.Mentions[0].ID != melissa.ID {
+		t.Errorf("edit mentions = %+v, want only Melissa", m.Mentions)
+	}
+	var plain map[string]json.RawMessage
+	f.get("/messages/"+url.PathEscape(preschoolJID)+"/T2", 200, &plain)
+	if string(plain["mentions"]) != "[]" {
+		t.Errorf("message without mentions: mentions = %s, want []", plain["mentions"])
+	}
+}
+
 // TestFollow walks the follow loop: read everything, then read only what's
 // new, including a photo added later to an album already read.
 func TestFollow(t *testing.T) {

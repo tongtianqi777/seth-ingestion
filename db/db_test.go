@@ -224,3 +224,84 @@ func TestBackfillSender(t *testing.T) {
 		}
 	}
 }
+
+func TestMentions(t *testing.T) {
+	ctx := context.Background()
+	s := openTemp(t)
+	phoebe := Mention{ID: "112481015967925", JID: "112481015967925@lid", Name: "Phoebe", Phone: "14082197736"}
+	m := msg("M1", "text", "@112481015967925 is the food here?", time.Now())
+	m.Mentions = []Mention{phoebe}
+	if _, err := s.Save(ctx, m, nil); err != nil {
+		t.Fatal(err)
+	}
+	// An album row created by an item without mentions takes them from a later copy.
+	if _, err := s.Save(ctx, msg("M2", "album", "", time.Now()), nil); err != nil {
+		t.Fatal(err)
+	}
+	m2 := msg("M2", "album", "", time.Now())
+	m2.Mentions = []Mention{phoebe}
+	if _, err := s.Save(ctx, m2, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Save(ctx, msg("M3", "text", "no mentions", time.Now()), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `[{"id":"112481015967925","jid":"112481015967925@lid","name":"Phoebe","phone":"14082197736"}]`
+	for id, w := range map[string]sql.NullString{"M1": {String: want, Valid: true}, "M2": {String: want, Valid: true}, "M3": {}} {
+		var got sql.NullString
+		if err := s.db.QueryRow(`SELECT mentions FROM messages WHERE message_id = ?`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != w {
+			t.Errorf("mentions of %s = %v, want %v", id, got, w)
+		}
+	}
+}
+
+// TestMigrateMentions upgrades a database from before the mentions column,
+// and sets mentions on its old messages.
+func TestMigrateMentions(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "messages.db")
+	old, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`
+		CREATE TABLE messages (
+			chat_jid TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL DEFAULT '', sender_jid TEXT NOT NULL,
+			sender_phone TEXT, sender_name TEXT, is_group INTEGER NOT NULL DEFAULT 0, sent_at TEXT NOT NULL,
+			ingested_at TEXT NOT NULL, message_type TEXT NOT NULL, body TEXT, edit_target_id TEXT, quoted_id TEXT,
+			media_file_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL, raw_json TEXT,
+			PRIMARY KEY (chat_jid, message_id));
+		INSERT INTO messages (chat_jid, message_id, sender_jid, sent_at, ingested_at, message_type, body, source, raw_json) VALUES
+			('c', 'MENTIONS', 's@lid', '2026-10-14T00:00:00Z', '2026-10-14T00:00:00Z', 'text', '@1 hi', 'live',
+			 '{"extendedTextMessage":{"text":"@1 hi","contextInfo":{"mentionedJID":["1@lid"]}}}'),
+			('c', 'PLAIN', 's@lid', '2026-10-14T00:00:00Z', '2026-10-14T00:00:00Z', 'text', 'hi', 'live', '{"conversation":"hi"}');`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	todo, err := s.UnresolvedMentions(ctx)
+	if err != nil || len(todo) != 1 || todo[0].MessageID != "MENTIONS" {
+		t.Fatalf("UnresolvedMentions = %+v, %v; want only MENTIONS", todo, err)
+	}
+	if err := s.SetMentions(ctx, "c", "MENTIONS", nil); err != nil {
+		t.Fatal(err)
+	}
+	if todo, _ := s.UnresolvedMentions(ctx); len(todo) != 0 {
+		t.Errorf("UnresolvedMentions after SetMentions = %+v, want none", todo)
+	}
+	// Opening again is harmless.
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.Close()
+}
