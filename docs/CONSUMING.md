@@ -15,7 +15,7 @@ For what each column means, see [DATABASE.md](DATABASE.md). For how the data is 
 
 ## At a glance
 
-- **Where:** `data/messages.db`, a SQLite database, and the media folder (by default `/Users/tnpbot/Downloads/whatsapp-poc-images`).
+- **Where:** `~/seth-ingestion-data/data/messages.db`, a SQLite database, and the media folder (by default `~/seth-ingestion-data/media`).
 - **What:** every message in the [listed groups](../groups.txt) of the Seth community, with its group, sender and files.
 - **Access:** read-only, through the [HTTP API](#http-api) or by opening the database. Any number of readers can run while seth-ingestion is writing.
 - **Freshness:** a live text message is in the database moments after it's sent. A message with a photo or file appears once the file has downloaded.
@@ -50,15 +50,15 @@ It returns **the same logical view** as reading the database the way this guide 
 You can start and stop it from the [dashboard](../README.md#the-dashboard), or from a terminal:
 
 ```bash
-./feed.sh                       # serves data/messages.db on http://127.0.0.1:8080
+./feed.sh                       # serves ~/seth-ingestion-data/data/messages.db on http://127.0.0.1:8080
 ./feed.sh -sim                  # serves the simulator's data-sim/ instead, for testing
 ./feed.sh -addr 0.0.0.0:8080    # also reachable from other computers on the network
 ```
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `-db` | `SETH_FEED_DB` | `data/messages.db` | The message database to serve |
-| `-media-dir` | `SETH_MEDIA_DIR` | `/Users/tnpbot/Downloads/whatsapp-poc-images` | Where the files are |
+| `-db` | `SETH_FEED_DB` | `~/seth-ingestion-data/data/messages.db` | The message database to serve |
+| `-media-dir` | `SETH_MEDIA_DIR` | `~/seth-ingestion-data/media` | Where the files are |
 | `-addr` | `SETH_FEED_ADDR` | `127.0.0.1:8080` | Address to listen on. The default only accepts requests from the same computer |
 | `-sim` | | off | Serve `data-sim/messages.db` and `data-sim/media` |
 | `-cors-origin` | `SETH_FEED_CORS_ORIGIN` | none | Let web pages from this origin call the API. Off by default |
@@ -413,15 +413,17 @@ Open the database **read-only**. seth-ingestion is the only writer, and a read-o
 
 ```python
 import sqlite3
+from pathlib import Path
 
-db = sqlite3.connect("file:data/messages.db?mode=ro", uri=True)
+DB = Path.home() / "seth-ingestion-data" / "data" / "messages.db"
+db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 db.row_factory = sqlite3.Row
 ```
 
 From a terminal:
 
 ```bash
-sqlite3 -readonly -header -column data/messages.db "SELECT name, media_folder FROM chat_groups;"
+sqlite3 -readonly -header -column ~/seth-ingestion-data/data/messages.db "SELECT name, media_folder FROM chat_groups;"
 ```
 
 The database runs in WAL mode, so readers never wait for the writer, and the writer never waits for readers. Each query sees the latest committed data. A message and its first files are committed together, so you never see a file whose message isn't there yet.
@@ -543,7 +545,7 @@ A file's full path is the media folder joined with its `relative_path`:
 ```python
 from pathlib import Path
 
-MEDIA_DIR = Path("/Users/tnpbot/Downloads/whatsapp-poc-images")
+MEDIA_DIR = Path.home() / "seth-ingestion-data" / "media"   # the default
 path = MEDIA_DIR / row["relative_path"]   # e.g. …/preschool/20261014T160400Z_3A37298F72373DFA1114.jpg
 ```
 
@@ -637,8 +639,9 @@ import sqlite3
 import time
 from pathlib import Path
 
-DB = "data/messages.db"
-MEDIA_DIR = Path("/Users/tnpbot/Downloads/whatsapp-poc-images")
+ROOT = Path.home() / "seth-ingestion-data"
+DB = ROOT / "data" / "messages.db"
+MEDIA_DIR = ROOT / "media"
 
 db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 db.row_factory = sqlite3.Row

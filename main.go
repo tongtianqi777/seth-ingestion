@@ -24,14 +24,15 @@ import (
 
 	"github.com/tianqitong/seth-ingestion/db"
 	"github.com/tianqitong/seth-ingestion/internal/grouplist"
+	"github.com/tianqitong/seth-ingestion/internal/paths"
 )
 
 func main() {
 	var (
 		community  = flag.String("community", env("SETH_COMMUNITY", "Seth"), "name (or group JID) of the WhatsApp community whose groups to record")
 		groupsFile = flag.String("groups-file", env("SETH_GROUPS_FILE", "groups.txt"), "file listing the community's groups to record, one name per line")
-		dataDir    = flag.String("data-dir", env("SETH_DATA_DIR", "./data"), "directory for the session and message databases")
-		mediaDir   = flag.String("media-dir", env("SETH_MEDIA_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "directory to save images and other media into, in a folder per group")
+		dataDir    = flag.String("data-dir", env("SETH_DATA_DIR", paths.DefaultDataDir), "directory for the session and message databases")
+		mediaDir   = flag.String("media-dir", env("SETH_MEDIA_DIR", paths.DefaultMediaDir), "directory to save images and other media into, in a folder per group")
 		logLevel   = flag.String("log-level", env("SETH_LOG_LEVEL", "INFO"), "DEBUG, INFO, WARN or ERROR")
 	)
 	flag.BoolVar(&statusLines, "status-lines", env("SETH_STATUS_LINES", "") != "", "also print machine-readable \"@seth ...\" lines (the QR code and link status) for seth-dashboard")

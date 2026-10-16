@@ -15,9 +15,9 @@ The source of truth is [db/schema.sql](../db/schema.sql). The write logic is in 
 
 | Store | Location | Owner | Contents |
 |---|---|---|---|
-| Message database | `data/messages.db` (`-data-dir`) | seth-ingestion | `chat_groups`, `messages` and `message_media_files` |
-| Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` (`-media-dir`) | seth-ingestion | the downloaded files that `message_media_files` points to, in a folder per group |
-| Session database | `data/whatsmeow-session.db` | whatsmeow | device keys, the login session and contact mappings |
+| Message database | `~/seth-ingestion-data/data/messages.db` (`-data-dir`) | seth-ingestion | `chat_groups`, `messages` and `message_media_files` |
+| Media folder | `~/seth-ingestion-data/media` (`-media-dir`) | seth-ingestion | the downloaded files that `message_media_files` points to, in a folder per group |
+| Session database | `~/seth-ingestion-data/data/whatsmeow-session.db` | whatsmeow | device keys, the login session and contact mappings |
 
 Both databases are SQLite. The message database runs in WAL mode, so it's normal to see `messages.db-wal` and `messages.db-shm` next to it. You can read it with `sqlite3` or any SQLite viewer while the program is running.
 
@@ -258,7 +258,7 @@ This happens when an album's items arrive before the album message, and when his
 
 ## Example queries
 
-Run these with `sqlite3 -readonly -header -column data/messages.db "<query>"`, or from any SQLite client.
+Run these with `sqlite3 -readonly -header -column ~/seth-ingestion-data/data/messages.db "<query>"`, or from any SQLite client.
 
 Latest messages, with their groups:
 

@@ -233,6 +233,23 @@ func TestDashboardRefusesOtherSites(t *testing.T) {
 	}
 }
 
+func TestDefaultFoldersAreInTheHomeFolder(t *testing.T) {
+	t.Setenv("HOME", "/Users/someone")
+	d := &dashboard{repo: "/repo"}
+	if got, want := d.abs(defaultConfig().MediaDir), "/Users/someone/seth-ingestion-data/media"; got != want {
+		t.Errorf("default media folder = %q, want %q", got, want)
+	}
+	if got, want := d.abs(defaultConfig().DataDir), "/Users/someone/seth-ingestion-data/data"; got != want {
+		t.Errorf("default data folder = %q, want %q", got, want)
+	}
+	if got, want := d.abs(defaultConfig().dbPath()), "/Users/someone/seth-ingestion-data/data/messages.db"; got != want {
+		t.Errorf("default database = %q, want %q", got, want)
+	}
+	if got, want := d.abs("data"), "/repo/data"; got != want {
+		t.Errorf("relative folder = %q, want %q", got, want)
+	}
+}
+
 func TestConfigValidation(t *testing.T) {
 	for _, c := range []Config{
 		{DataDir: "", MediaDir: "m", FeedAddr: "127.0.0.1:8080"},

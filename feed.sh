@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds seth-feed if needed and runs it. seth-feed serves the recorded
 # messages as a read-only REST API with JSON responses, for AI agents.
-#   ./feed.sh            serve data/messages.db on http://127.0.0.1:8080
+#   ./feed.sh            serve ~/seth-ingestion-data/data/messages.db on http://127.0.0.1:8080
 #   ./feed.sh -sim       serve the simulator's data-sim/ instead
 #   ./feed.sh -h         all flags
 set -euo pipefail

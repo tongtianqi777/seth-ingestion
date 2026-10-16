@@ -18,12 +18,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/tianqitong/seth-ingestion/internal/paths"
 )
 
 func main() {
 	var (
-		dbPath   = flag.String("db", env("SETH_FEED_DB", "data/messages.db"), "message database to serve (opened read-only)")
-		mediaDir = flag.String("media-dir", env("SETH_MEDIA_DIR", "/Users/tnpbot/Downloads/whatsapp-poc-images"), "media folder the database's relative_path values point into")
+		dbPath   = flag.String("db", env("SETH_FEED_DB", paths.DefaultDBPath), "message database to serve (opened read-only)")
+		mediaDir = flag.String("media-dir", env("SETH_MEDIA_DIR", paths.DefaultMediaDir), "media folder the database's relative_path values point into")
 		addr     = flag.String("addr", env("SETH_FEED_ADDR", "127.0.0.1:8080"), "address to listen on; 127.0.0.1 keeps it to this computer, 0.0.0.0 opens it to the network")
 		sim      = flag.Bool("sim", false, "serve the simulator's data (data-sim/messages.db and data-sim/media) instead")
 		cors     = flag.String("cors-origin", env("SETH_FEED_CORS_ORIGIN", ""), "allow browser pages from this origin (or *) to call the API; empty sends no CORS headers")
@@ -33,7 +35,7 @@ func main() {
 		*dbPath, *mediaDir = "data-sim/messages.db", "data-sim/media"
 	}
 	logger := log.New(os.Stderr, "seth-feed ", log.LstdFlags)
-	if err := run(*dbPath, *mediaDir, *addr, *cors, logger); err != nil {
+	if err := run(paths.ExpandHome(*dbPath), paths.ExpandHome(*mediaDir), *addr, *cors, logger); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

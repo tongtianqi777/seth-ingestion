@@ -52,7 +52,7 @@ What you get:
 - 🖼️ **Photos, videos, voice notes and documents**, saved in a folder per group, such as `preschool/`.
 - 🤖 **A steady feed for AI agents.** Rows are only ever added, never deleted, so an agent can follow along by remembering the last row it saw.
 
-Everything stays on the machine running the program: a single SQLite file in `data/` and a media folder. No server or cloud service is involved.
+Everything stays on the machine running the program: a single SQLite file and a media folder, both in `~/seth-ingestion-data/`. No server or cloud service is involved.
 
 ## Quick start
 
@@ -113,8 +113,8 @@ Press **Start** under **Data feed**. When it says **Serving**, agents can connec
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Data folder | `data` | Holds the message database (`messages.db`) and the linked WhatsApp session |
-| Media folder | `/Users/tnpbot/Downloads/whatsapp-poc-images` | Where photos and other files are saved, in a folder per group |
+| Data folder | `~/seth-ingestion-data/data` | Holds the message database (`messages.db`) and the linked WhatsApp session |
+| Media folder | `~/seth-ingestion-data/media` | Where photos and other files are saved, in a folder per group. `~` is your home folder, so the default works on any Mac |
 | Feed address | `127.0.0.1:8080` | Where the data feed listens. `0.0.0.0:8080` opens it to your network, with no login |
 
 ### At a glance
@@ -173,7 +173,7 @@ Your own messages are recorded the same way as everyone else's. `sender` shows e
 **A quick look at the data:**
 
 ```bash
-sqlite3 -readonly -header -column data/messages.db \
+sqlite3 -readonly -header -column ~/seth-ingestion-data/data/messages.db \
   "SELECT m.sent_at, g.name AS grp, m.sender, m.message_type, m.body
    FROM messages m JOIN chat_groups g ON g.group_jid = m.chat_jid
    ORDER BY m.sent_at DESC LIMIT 20;"
@@ -199,8 +199,10 @@ An agent calls `/messages/new` every few seconds with the `cursor` from its last
 
 ```python
 import sqlite3
+from pathlib import Path
 
-db = sqlite3.connect("file:data/messages.db?mode=ro", uri=True)
+DB = Path.home() / "seth-ingestion-data" / "data" / "messages.db"
+db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 last_seen = 0  # the highest rowid handled so far
 new = db.execute("""
     SELECT m.rowid, g.name, m.sender, m.message_type, m.body
@@ -221,14 +223,14 @@ The defaults match the setup above. To change them, pass flags to `./run.sh` (se
 |---|---|---|
 | `-community` | `SETH_COMMUNITY` | `Seth`. The community's name, or its group JID if several communities share the name |
 | `-groups-file` | `SETH_GROUPS_FILE` | `groups.txt` |
-| `-media-dir` | `SETH_MEDIA_DIR` | `/Users/tnpbot/Downloads/whatsapp-poc-images` |
-| `-data-dir` | `SETH_DATA_DIR` | `./data`, for the message database and the WhatsApp session |
+| `-media-dir` | `SETH_MEDIA_DIR` | `~/seth-ingestion-data/media`, in your home folder |
+| `-data-dir` | `SETH_DATA_DIR` | `~/seth-ingestion-data/data`, for the message database and the WhatsApp session |
 | `-log-level` | `SETH_LOG_LEVEL` | `INFO`. Also `DEBUG`, `WARN` or `ERROR` |
 
 ## Day to day
 
 - **Unlinking.** If you remove the device under **Linked Devices** on your phone while the program runs, it logs `This device was unlinked from WhatsApp` and shows a new QR code. Scan it to link again, or press Ctrl+C. The next `./run.sh` starts with a QR code too.
-- **Starting fresh.** To clear the recorded data, delete `data/messages.db` and the media folder.
+- **Starting fresh.** To clear the recorded data, delete `~/seth-ingestion-data/data/messages.db` and the media folder.
 - **Upgrading from the single-contact version.** Earlier versions recorded one contact's direct messages. Those rows are kept (`is_group = 0`, with no `chat_groups` row), and their files stay at the top of the media folder.
 
 ## Troubleshooting
